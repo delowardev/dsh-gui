@@ -147,7 +147,14 @@ pub fn ensure_runtime(
     let runtime_dir = root.join(&manifest.runtime_version);
 
     if is_installed(&runtime_dir) {
-        on_progress(1.0, "Runtime ready");
+        // Already installed: report no fraction so the progress bar stays
+        // hidden. Saying "downloading" here was wrong and alarming.
+        eprintln!(
+            "[shell] runtime {} already installed at {}",
+            manifest.runtime_version,
+            runtime_dir.display()
+        );
+        on_progress(-1.0, "Starting harness…");
         return Ok(runtime_dir);
     }
 
@@ -165,7 +172,7 @@ pub fn ensure_runtime(
     let archive = staging.join(&artifact.name);
 
     // --- download + hash ----------------------------------------------------
-    on_progress(0.0, "Downloading runtime…");
+    on_progress(0.0, "Downloading the harness runtime…");
     let response = ureq::get(&artifact.url)
         .call()
         .map_err(|e| format!("download failed: {e}"))?;
@@ -199,8 +206,16 @@ pub fn ensure_runtime(
             } else {
                 -1.0
             };
-            let mb = written as f32 / 1_048_576.0;
-            on_progress(fraction, &format!("Downloading runtime… {mb:.0} MB"));
+            let done = written as f32 / 1_048_576.0;
+            let message = if total_bytes > 0 {
+                format!(
+                    "Downloading the harness runtime… {done:.0} of {:.0} MB",
+                    total_bytes as f32 / 1_048_576.0
+                )
+            } else {
+                format!("Downloading the harness runtime… {done:.0} MB")
+            };
+            on_progress(fraction, &message);
         }
     }
     drop(file);

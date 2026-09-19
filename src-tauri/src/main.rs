@@ -375,12 +375,16 @@ fn open_harness(app: &tauri::AppHandle, url: &str) {
 
 /// The isolated `DSH_HOME` this app owns.
 ///
-/// An explicit `DSH_HOME` still wins, which keeps the development loop and the
-/// test suite able to redirect it.
+/// Deliberately does **not** read `DSH_HOME`. That variable belongs to the
+/// harness CLI, and any user who exports it would otherwise launch this app
+/// straight into their real `~/.dsh` — silently contradicting the promise that
+/// the app's data is its own and does not touch an existing `dsh` install. The
+/// dev/test override is therefore a distinct name that no user would happen to
+/// have set.
 fn harness_home(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    if let Ok(existing) = std::env::var("DSH_HOME") {
-        if !existing.trim().is_empty() {
-            return Ok(PathBuf::from(existing));
+    if let Ok(override_dir) = std::env::var("DSH_GUI_HOME") {
+        if !override_dir.trim().is_empty() {
+            return Ok(PathBuf::from(override_dir));
         }
     }
     let data_dir = app
@@ -472,7 +476,7 @@ fn bootstrap(app: tauri::AppHandle) {
         }
     };
 
-    report_progress(&app, 1.0, "Preparing harness…");
+    report_progress(&app, -1.0, "Preparing harness…");
     if let Err(error) = ensure_profile(&node, &bin, &home) {
         report_failure(&app, &error);
         return;
@@ -502,6 +506,7 @@ fn run_sidecar(app: tauri::AppHandle, node: String, bin: String, home: PathBuf) 
 
     eprintln!("[shell] spawning harness: {node}");
     eprintln!("[shell]   DSH_HOME={}", home.display());
+    report_progress(&app, -1.0, "Starting the harness…");
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -683,32 +688,9 @@ fn shell_status(webview: tauri::Webview) -> Result<String, String> {
 }
 
 // --- terminal commands ------------------------------------------------------
-
-#[tauri::command]
-fn terminal_status(app: tauri::AppHandle, webview: tauri::Webview) -> Result<bool, String> {
-    assert_caller(&webview, &[TERMINAL])?;
-    Ok(terminal::is_installed(&terminal::install_root(&app_data(&app)?)))
-}
-
-/// Download the terminal front-end.
-///
-/// The PTY side is already compiled in; this is the part kept out of the base
-/// install, pinned by digest in `src/terminal.rs`.
-#[tauri::command]
-fn terminal_install(app: tauri::AppHandle, webview: tauri::Webview) -> Result<(), String> {
-    assert_caller(&webview, &[TERMINAL])?;
-    terminal::install(&app_data(&app)?)
-        .inspect_err(|error| eprintln!("[shell] terminal install failed: {error}"))
-}
-
-#[tauri::command]
-fn terminal_assets(
-    app: tauri::AppHandle,
-    webview: tauri::Webview,
-) -> Result<terminal::Assets, String> {
-    assert_caller(&webview, &[TERMINAL])?;
-    terminal::assets(&app_data(&app)?)
-}
+//
+// The emulator front-end is vendored into `ui/vendor`, so there is no install
+// step and no command to hand assets to the page. These are sessions only.
 
 #[tauri::command]
 fn terminal_open(
@@ -768,9 +750,6 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             select_tab,
             shell_status,
-            terminal_status,
-            terminal_install,
-            terminal_assets,
             terminal_open,
             terminal_list,
             terminal_write,

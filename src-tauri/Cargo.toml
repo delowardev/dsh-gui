@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 # Tauri v2 requires >= 1.77.2; we pin the toolchain in rust-toolchain.toml.
 rust-version = "1.77.2"
@@ -41,11 +41,9 @@ sha2 = "0.10"
 tar = "0.4"
 flate2 = "1"
 
-# Real PTY for the terminal tab. Compiled in and unconditional; only the
-# emulator front-end is downloaded on demand (src/terminal.rs).
+# Real PTY for the terminal tab. Compiled in and unconditional; the emulator
+# front-end is vendored into ui/vendor by scripts/vendor-terminal.sh.
 portable-pty = "0.9.0"
-# Fonts are handed to the page as data: URLs.
-base64 = "0.22"
 
 [profile.dev]
 incremental = true

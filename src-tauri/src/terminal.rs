@@ -1,14 +1,12 @@
-//! Optional terminal (PLAN.md Phase 4).
+//! Terminal sessions (PLAN.md Phase 4).
 //!
-//! Split deliberately in two:
+//! The shell runs in Rust through a real PTY (`portable-pty`). The emulator
+//! front-end (`xterm.js`) and the Monaspace Krypton font used to be downloaded
+//! on first use; at ~660 KB that bought nothing but an install step, a network
+//! dependency, and an IPC channel to hand the assets to the page. They are now
+//! vendored into `ui/vendor` by `scripts/vendor-terminal.sh` and loaded with
+//! ordinary tags, so this module is only about sessions.
 //!
-//!   * The **shell** runs in Rust through a real PTY (`portable-pty`, compiled
-//!     in). That is small and unconditional.
-//!   * The **emulator front-end** (`xterm.js`) is *not* shipped. It is
-//!     downloaded on first use and pinned by digest, so the base app stays
-//!     clean and the terminal remains an explicit opt-in.
-//!
-//! Sessions are keyed by an opaque id so the UI can hold several at once.
 //! Output is buffered per session and drained by the page: a Tauri event stream
 //! would be tidier, but events are a core-plugin command and would need an ACL
 //! capability, while polling only uses our own commands.
@@ -20,162 +18,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use sha2::{Digest, Sha256};
-
-/// Version directory under `<app-data>/terminal`.
-const VERSION: &str = "xterm-6.0.0";
-
-/// One pinned download.
-struct Pinned {
-    url: &'static str,
-    sha256: &'static str,
-    /// `(path inside the tarball, file name we write)`.
-    members: &'static [(&'static str, &'static str)],
-}
-
-/// The terminal front-end, pinned to exact versions and digests.
-///
-/// Hashes are of the tarballs as published by the registry, so a substituted
-/// download is refused rather than executed in a page holding IPC.
-const PINNED: &[Pinned] = &[
-    Pinned {
-        url: "https://registry.npmjs.org/@xterm/xterm/-/xterm-6.0.0.tgz",
-        sha256: "908e66e04af6c8dc6b00dd3b54de088e2e81e5ed866284fd6c2fb3c2d1c7a3f6",
-        members: &[
-            ("package/lib/xterm.js", "xterm.js"),
-            ("package/css/xterm.css", "xterm.css"),
-        ],
-    },
-    Pinned {
-        url: "https://registry.npmjs.org/@xterm/addon-fit/-/addon-fit-0.11.0.tgz",
-        sha256: "26003b4517a132b64e4ff228fd88a5fda3fff5e606c76093f6dcff772e9ecec0",
-        members: &[("package/lib/addon-fit.js", "addon-fit.js")],
-    },
-    // Monaspace Krypton (SIL OFL 1.1), latin subset, via Fontsource. Only the
-    // four faces a terminal uses, so the download stays small.
-    Pinned {
-        url: "https://registry.npmjs.org/@fontsource/monaspace-krypton/-/monaspace-krypton-5.3.0.tgz",
-        sha256: "95da6cdd8279679be96e46691c0e544de550bfdd012337de09bb1a6ea79534fd",
-        members: &[
-            ("package/files/monaspace-krypton-latin-400-normal.woff2", "font-400.woff2"),
-            ("package/files/monaspace-krypton-latin-400-italic.woff2", "font-400-italic.woff2"),
-            ("package/files/monaspace-krypton-latin-700-normal.woff2", "font-700.woff2"),
-            ("package/files/monaspace-krypton-latin-700-italic.woff2", "font-700-italic.woff2"),
-            ("package/LICENSE", "MONASPACE-LICENSE.txt"),
-        ],
-    },
-];
-
-/// Install location for the front-end.
-pub fn install_root(app_data: &Path) -> PathBuf {
-    app_data.join("terminal").join(VERSION)
-}
-
-pub fn is_installed(root: &Path) -> bool {
-    root.join(".installed").exists()
-        && root.join("xterm.js").exists()
-        && root.join("addon-fit.js").exists()
-        && root.join("font-400.woff2").exists()
-}
-
-/// Download, verify, and unpack the terminal front-end.
-pub fn install(app_data: &Path) -> Result<(), String> {
-    let root = install_root(app_data);
-    if is_installed(&root) {
-        return Ok(());
-    }
-
-    let staging = root.with_extension("staging");
-    let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).map_err(|e| format!("could not create staging dir: {e}"))?;
-
-    for asset in PINNED {
-        let response = ureq::get(asset.url)
-            .call()
-            .map_err(|e| format!("download failed: {e}"))?;
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .read_to_end(&mut bytes)
-            .map_err(|e| format!("download interrupted: {e}"))?;
-
-        let actual = format!("{:x}", Sha256::digest(&bytes));
-        if !actual.eq_ignore_ascii_case(asset.sha256) {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(format!(
-                "terminal asset checksum mismatch for {}\n  expected {}\n  actual   {}",
-                asset.url, asset.sha256, actual
-            ));
-        }
-
-        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
-        for entry in archive.entries().map_err(|e| e.to_string())? {
-            let mut entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path().map_err(|e| e.to_string())?.to_path_buf();
-            let Some(target) = asset
-                .members
-                .iter()
-                .find(|(source, _)| Path::new(source) == path)
-                .map(|(_, target)| *target)
-            else {
-                continue;
-            };
-            let mut contents = Vec::new();
-            entry.read_to_end(&mut contents).map_err(|e| e.to_string())?;
-            fs::write(staging.join(target), contents)
-                .map_err(|e| format!("could not write {target}: {e}"))?;
-        }
-    }
-
-    fs::write(staging.join(".installed"), VERSION)
-        .map_err(|e| format!("could not write the install marker: {e}"))?;
-
-    let _ = fs::remove_dir_all(&root);
-    if let Some(parent) = root.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::rename(&staging, &root).map_err(|e| format!("could not install the terminal: {e}"))?;
-    Ok(())
-}
-
-/// Front-end sources handed to the page to inject.
-///
-/// Fonts travel as `data:` URLs because the page is served from `tauri://` and
-/// cannot reach files in the app data directory directly.
-#[derive(serde::Serialize)]
-pub struct Assets {
-    pub css: String,
-    pub xterm: String,
-    pub fit: String,
-    pub font_regular: String,
-    pub font_regular_italic: String,
-    pub font_bold: String,
-    pub font_bold_italic: String,
-}
-
-pub fn assets(app_data: &Path) -> Result<Assets, String> {
-    let root = install_root(app_data);
-    let read = |name: &str| {
-        fs::read_to_string(root.join(name)).map_err(|e| format!("could not read {name}: {e}"))
-    };
-    let font = |name: &str| -> Result<String, String> {
-        use base64::Engine as _;
-        let bytes = fs::read(root.join(name)).map_err(|e| format!("could not read {name}: {e}"))?;
-        Ok(format!(
-            "data:font/woff2;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        ))
-    };
-    Ok(Assets {
-        css: read("xterm.css")?,
-        xterm: read("xterm.js")?,
-        fit: read("addon-fit.js")?,
-        font_regular: font("font-400.woff2")?,
-        font_regular_italic: font("font-400-italic.woff2")?,
-        font_bold: font("font-700.woff2")?,
-        font_bold_italic: font("font-700-italic.woff2")?,
-    })
-}
 
 // --- shell integration ------------------------------------------------------
 
