@@ -127,12 +127,18 @@ echo "    $((BEFORE / 1024)) MB -> $((AFTER / 1024)) MB"
 # --- 4. Package + manifest --------------------------------------------------
 echo "==> packaging $ARTIFACT"
 rm -f "$OUT/$ARTIFACT"
-tar -czf "$OUT/$ARTIFACT" -C "$STAGE" runtime
+# COPYFILE_DISABLE stops bsdtar emitting AppleDouble `._name` sidecars, which the
+# installer would otherwise extract onto the user's disk as junk.
+COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$OUT/$ARTIFACT" -C "$STAGE" runtime
 
 SHA="$(shasum -a 256 "$OUT/$ARTIFACT" | cut -d' ' -f1)"
 BYTES="$(stat -f '%z' "$OUT/$ARTIFACT")"
 FILES="$(tar -tzf "$OUT/$ARTIFACT" | wc -l | tr -d ' ')"
-INSTALLED_BYTES="$((AFTER * 1024))"
+# Logical size, NOT `du`: du reports allocated blocks, and on APFS that reads
+# well below the real footprint of a freshly extracted tree (249 MB reported vs
+# 318 MB actually materialised). Sum real file sizes so the number we quote
+# matches what the user's disk will show.
+INSTALLED_BYTES="$(find "$RUNTIME" -type f -exec stat -f '%z' {} + | awk '{ total += $1 } END { print total + 0 }')"
 
 MANIFEST="$OUT/runtime.json"
 cat > "$MANIFEST" <<JSON

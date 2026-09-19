@@ -5,3 +5,4 @@ node_modules
 .DS_Store
 api-key.txt
 .runtime-build
+.runtime-test

@@ -17,5 +17,15 @@ tauri = { version = "2.11.1", features = [] }
 # SIGTERM to the sidecar so dsh disposes its fiber tree gracefully (exit 0).
 libc = "0.2"
 
+# Runtime acquisition (Phase 1.1).
+# HTTP is done in-process with a Rust client on purpose: shelling out to
+# curl/tar risks stamping com.apple.quarantine onto the extracted tree.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "2"
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1"
+
 [profile.dev]
 incremental = true

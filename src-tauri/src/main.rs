@@ -1,19 +1,20 @@
-//! DSH Desktop — M1 spike shell.
+//! DSH Desktop — Tauri shell.
 //!
-//! Proves the Phase 0.1 integration path end to end:
+//! Responsibilities, in order:
 //!
-//!   1. spawn `dsh --profile web --no-open --port 0` with a login-shell `PATH`
-//!   2. parse the authenticated URL it prints on stdout
-//!   3. open a window on that URL
-//!   4. terminate the child gracefully when the app exits, and never leave an
-//!      orphan behind if it does not
+//!   1. reap a harness orphaned by a previous run that died without cleanup
+//!   2. acquire the pinned runtime (download + verify + install) — Phase 1.1
+//!   3. spawn the harness with a login-shell `PATH`
+//!   4. parse the authenticated URL it prints and open the window on it
+//!   5. stop it gracefully on exit, and never leave an orphan
 //!
-//! Deliberately minimal. No runtime download yet (Phase 1.1), no bundled
-//! frontend beyond the loading page, and **no capabilities granted to the
-//! loaded page** — it is a remote origin (see PLAN.md §4).
+//! Deliberately thin. The loaded page is a **remote origin** and is granted no
+//! Tauri IPC and no capabilities (see PLAN.md §4); the loading page is driven
+//! from Rust with `eval`, which needs no permissions on the page side.
 //!
-//! Phase 1.1 replaces `DEFAULT_DSH_BIN` with the downloaded runtime. Phase 1.2
-//! adds `DSH_HOME` isolation — note this spike still inherits `DSH_HOME`.
+//! Phase 1.2 will set `DSH_HOME` explicitly and use a dedicated `tauri` profile.
+
+mod runtime;
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -27,13 +28,37 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 /// See `dsh-web-app/lib/index.js:203`: `dsh web: <url>[ (LAN: <url>)]`
 const URL_MARKER: &str = "dsh web: ";
 
-/// Spike-only fallback. Replaced by the downloaded runtime in Phase 1.1.
-/// Override with `DSH_BIN` to point at any `@deepseek-ai/dsh` `lib/bin.js`.
-const DEFAULT_DSH_BIN: &str =
-    "/Users/delowar/.npm/_npx/1e7f6d9597241db0/node_modules/@deepseek-ai/dsh/lib/bin.js";
-
 /// The sidecar handle, owned for the lifetime of the process.
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
+
+// --- loading-window helpers -------------------------------------------------
+
+/// Run a script in the loading page. `eval` needs no page-side permission, which
+/// keeps the IPC surface empty.
+fn eval_loading(app: &tauri::AppHandle, script: &str) {
+    if let Some(window) = app.get_webview_window("loading") {
+        let _ = window.eval(script);
+    }
+}
+
+fn report_progress(app: &tauri::AppHandle, fraction: f32, message: &str) {
+    let quoted = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_owned());
+    eval_loading(
+        app,
+        &format!("window.__dshProgress && window.__dshProgress({fraction}, {quoted})"),
+    );
+}
+
+fn report_failure(app: &tauri::AppHandle, message: &str) {
+    eprintln!("[shell] startup failed: {message}");
+    let quoted = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_owned());
+    eval_loading(
+        app,
+        &format!("window.__dshFailure && window.__dshFailure({quoted})"),
+    );
+}
+
+// --- sidecar orphan reaping -------------------------------------------------
 
 /// Recorded so a crash or Force Quit cannot orphan the harness (Phase 1.4).
 fn pid_file_path() -> PathBuf {
@@ -60,7 +85,7 @@ fn process_executable(pid: i32) -> Option<String> {
 
 /// Whether a live process is still the interpreter we originally spawned.
 ///
-/// `expected` is absolute when `DSH_NODE` is set; otherwise it may just be
+/// `expected` is absolute for an installed runtime; otherwise it may just be
 /// `node`, so fall back to comparing file names.
 fn executable_matches(actual: &str, expected: &str) -> bool {
     if expected.starts_with('/') {
@@ -114,15 +139,13 @@ fn reap_orphaned_sidecar() {
     }
 }
 
+// --- environment ------------------------------------------------------------
+
 /// Capture the user's real `PATH` from a login shell.
 ///
 /// A macOS app launched from Finder/Dock inherits launchd's `PATH`
 /// (`/usr/bin:/bin:/usr/sbin:/sbin`), not the user's. Without this the harness
 /// bash tool, `git`, and model-driven commands fail in confusing ways.
-///
-/// Note this is exactly why the runtime must be *bundled and pinned*: on this
-/// machine the login shell resolves `node` to a different install than the
-/// invoking environment does (PLAN.md §2). See TODO.md "Version locks".
 fn login_shell_path() -> Option<String> {
     let output = Command::new("/bin/zsh")
         .args(["-lic", "env -0"])
@@ -138,7 +161,9 @@ fn login_shell_path() -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Pull the authenticated URL out of one stdout line.
+// --- harness -----------------------------------------------------------------
+
+/// The authenticated URL printed once the server has bound.
 ///
 /// The line may append a LAN URL in parentheses; `split_whitespace` drops it.
 /// We require the loopback host and a token so a stray log line can never
@@ -161,7 +186,7 @@ fn open_main_window(app: &tauri::AppHandle, url: &str) {
     let parsed = match tauri::Url::parse(url) {
         Ok(parsed) => parsed,
         Err(error) => {
-            eprintln!("[shell] refusing to open unparsable URL {url:?}: {error}");
+            report_failure(app, &format!("refusing to open unparsable URL: {error}"));
             return;
         }
     };
@@ -189,11 +214,45 @@ fn open_main_window(app: &tauri::AppHandle, url: &str) {
     }
 }
 
-/// Spawn the harness and stream its output until it exits.
-fn run_sidecar(app: tauri::AppHandle) {
-    let node = std::env::var("DSH_NODE").unwrap_or_else(|_| "node".to_owned());
-    let bin = std::env::var("DSH_BIN").unwrap_or_else(|_| DEFAULT_DSH_BIN.to_owned());
+/// Resolve the interpreter and dsh entry script to run.
+///
+/// `DSH_NODE` + `DSH_BIN` together bypass acquisition entirely, which keeps the
+/// development loop fast and lets the runtime pipeline be tested in isolation.
+fn resolve_runtime(app: &tauri::AppHandle) -> Result<(String, String), String> {
+    if let (Ok(node), Ok(bin)) = (std::env::var("DSH_NODE"), std::env::var("DSH_BIN")) {
+        eprintln!("[shell] using DSH_NODE/DSH_BIN override");
+        return Ok((node, bin));
+    }
 
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("could not resolve the application data directory: {e}"))?;
+
+    let handle = app.clone();
+    let runtime_dir = runtime::ensure_runtime(&data_dir, &move |fraction, message| {
+        report_progress(&handle, fraction, message);
+    })?;
+
+    Ok((
+        runtime::node_binary(&runtime_dir).to_string_lossy().into_owned(),
+        runtime::dsh_entry(&runtime_dir).to_string_lossy().into_owned(),
+    ))
+}
+
+/// Acquire the runtime, then spawn the harness and stream its output.
+fn bootstrap(app: tauri::AppHandle) {
+    let (node, bin) = match resolve_runtime(&app) {
+        Ok(pair) => pair,
+        Err(error) => {
+            report_failure(&app, &error);
+            return;
+        }
+    };
+    run_sidecar(app, node, bin);
+}
+
+fn run_sidecar(app: tauri::AppHandle, node: String, bin: String) {
     let mut command = Command::new(&node);
     command
         .arg(&bin)
@@ -209,12 +268,12 @@ fn run_sidecar(app: tauri::AppHandle) {
         eprintln!("[shell] warning: could not read a login-shell PATH; using the inherited one");
     }
 
-    eprintln!("[shell] spawning: {node} {bin} --profile web --no-open --port 0");
+    eprintln!("[shell] spawning harness: {node}");
 
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("[shell] could not spawn the harness: {error}");
+            report_failure(&app, &format!("could not start the harness: {error}"));
             return;
         }
     };
@@ -285,8 +344,8 @@ fn main() {
 
     tauri::Builder::default()
         .setup(|app| {
-            // A small loading window while the harness boots. The real window is
-            // created once the authenticated URL is known.
+            // A small loading window while the runtime is acquired and the
+            // harness boots. The real window is created once the URL is known.
             WebviewWindowBuilder::new(app, "loading", WebviewUrl::App("index.html".into()))
                 .title("DSH Desktop")
                 .inner_size(460.0, 300.0)
@@ -294,7 +353,7 @@ fn main() {
                 .build()?;
 
             let handle = app.handle().clone();
-            std::thread::spawn(move || run_sidecar(handle));
+            std::thread::spawn(move || bootstrap(handle));
             Ok(())
         })
         .build(tauri::generate_context!())
