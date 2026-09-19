@@ -1,18 +1,30 @@
 //! DSH Desktop — Tauri shell.
 //!
-//! Responsibilities, in order:
+//! One window, several sibling webviews:
 //!
+//! ```text
+//! ┌──────────────────────────────────────────────┐
+//! │ chrome   (tab bar, our page, IPC granted)    │  TAB_BAR_HEIGHT
+//! ├──────────────────────────────────────────────┤
+//! │ agent    (harness UI, remote origin, no IPC) │  rest
+//! │   or terminal (local page, no IPC)           │
+//! └──────────────────────────────────────────────┘
+//! ```
+//!
+//! Multi-webview is used rather than an iframe on purpose: the harness page
+//! stays the **top-level document** of its own webview, so the harness `/api`
+//! trust fence is never in question. An iframe under `tauri://` may well be
+//! classified `cross-site`, which that fence rejects outright (PLAN.md §3).
+//!
+//! Requires Tauri's `unstable` feature — `Window::add_child` is gated behind it.
+//!
+//! Startup order:
 //!   1. reap a harness orphaned by a previous run that died without cleanup
-//!   2. acquire the pinned runtime (download + verify + install) — Phase 1.1
-//!   3. spawn the harness with a login-shell `PATH`
-//!   4. parse the authenticated URL it prints and open the window on it
-//!   5. stop it gracefully on exit, and never leave an orphan
-//!
-//! Deliberately thin. The loaded page is a **remote origin** and is granted no
-//! Tauri IPC and no capabilities (see PLAN.md §4); the loading page is driven
-//! from Rust with `eval`, which needs no permissions on the page side.
-//!
-//! Phase 1.2 will set `DSH_HOME` explicitly and use a dedicated `tauri` profile.
+//!   2. acquire the pinned runtime (download + verify + install)
+//!   3. prepare the isolated harness home and owned profile
+//!   4. spawn the harness with a login-shell `PATH`
+//!   5. navigate the agent webview to the authenticated URL it prints
+//!   6. stop it gracefully on exit, and never leave an orphan
 
 mod runtime;
 
@@ -22,7 +34,12 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    Manager, PhysicalPosition, PhysicalSize, Position, Rect, Size, WebviewUrl, WindowEvent,
+};
+
+/// Height of the tab strip, in logical pixels.
+const TAB_BAR_HEIGHT: f64 = 38.0;
 
 /// Printed by the `web-runtime` row once the server has bound.
 /// See `dsh-web-app/lib/index.js:203`: `dsh web: <url>[ (LAN: <url>)]`
@@ -32,40 +49,90 @@ const URL_MARKER: &str = "dsh web: ";
 ///
 /// Deliberately NOT `web`: sharing that profile would let a terminal `dsh web`
 /// and this app mutate each other's plugin state concurrently. Also NOT
-/// `desktop`, which the CLI reserves for the official Electron app and rejects
-/// for boot, config-dump, and plugin management alike.
+/// `desktop`, which the CLI reserves for the official Electron app.
 const PROFILE_NAME: &str = "tauri";
 
 /// Shipped template the owned profile is created from.
 const PROFILE_TEMPLATE: &str = "web";
 
+/// Webview labels.
+const CHROME: &str = "chrome";
+const AGENT: &str = "agent";
+const TERMINAL: &str = "terminal";
+
 /// The sidecar handle, owned for the lifetime of the process.
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
 
-// --- loading-window helpers -------------------------------------------------
+// --- window layout ----------------------------------------------------------
 
-/// Run a script in the loading page. `eval` needs no page-side permission, which
-/// keeps the IPC surface empty.
-fn eval_loading(app: &tauri::AppHandle, script: &str) {
-    if let Some(window) = app.get_webview_window("loading") {
-        let _ = window.eval(script);
+/// Lay the webviews out for a window of `size`.
+///
+/// Children do not reflow with the window, so every resize has to be applied by
+/// hand. Kept in one place so the three webviews can never disagree.
+fn layout(app: &tauri::AppHandle, size: PhysicalSize<u32>) {
+    let scale = app
+        .get_webview(CHROME)
+        .and_then(|webview| webview.window().scale_factor().ok())
+        .unwrap_or(1.0);
+    let bar = (TAB_BAR_HEIGHT * scale).round().max(1.0) as u32;
+    let body_height = size.height.saturating_sub(bar);
+
+    let strip = |label: &str, top: u32, height: u32| {
+        if let Some(webview) = app.get_webview(label) {
+            let _ = webview.set_bounds(Rect {
+                position: Position::Physical(PhysicalPosition::new(0, top as i32)),
+                size: Size::Physical(PhysicalSize::new(size.width, height)),
+            });
+        }
+    };
+
+    strip(CHROME, 0, bar);
+    strip(AGENT, bar, body_height);
+    strip(TERMINAL, bar, body_height);
+}
+
+// --- page helpers -----------------------------------------------------------
+
+/// Run a script in one of our own pages.
+///
+/// `eval` needs no page-side permission, which is what lets the loading and tab
+/// chrome be driven without widening the IPC surface.
+fn eval_in(app: &tauri::AppHandle, label: &str, script: &str) {
+    if let Some(webview) = app.get_webview(label) {
+        let _ = webview.eval(script);
     }
 }
 
+fn quoted(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
+}
+
 fn report_progress(app: &tauri::AppHandle, fraction: f32, message: &str) {
-    let quoted = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_owned());
-    eval_loading(
+    eval_in(
         app,
-        &format!("window.__dshProgress && window.__dshProgress({fraction}, {quoted})"),
+        AGENT,
+        &format!(
+            "window.__dshProgress && window.__dshProgress({fraction}, {})",
+            quoted(message)
+        ),
+    );
+}
+
+fn report_status(app: &tauri::AppHandle, message: &str) {
+    eval_in(
+        app,
+        CHROME,
+        &format!("window.__dshStatus && window.__dshStatus({})", quoted(message)),
     );
 }
 
 fn report_failure(app: &tauri::AppHandle, message: &str) {
     eprintln!("[shell] startup failed: {message}");
-    let quoted = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_owned());
-    eval_loading(
+    report_status(app, "Startup failed");
+    eval_in(
         app,
-        &format!("window.__dshFailure && window.__dshFailure({quoted})"),
+        AGENT,
+        &format!("window.__dshFailure && window.__dshFailure({})", quoted(message)),
     );
 }
 
@@ -95,9 +162,6 @@ fn process_executable(pid: i32) -> Option<String> {
 }
 
 /// Whether a live process is still the interpreter we originally spawned.
-///
-/// `expected` is absolute for an installed runtime; otherwise it may just be
-/// `node`, so fall back to comparing file names.
 fn executable_matches(actual: &str, expected: &str) -> bool {
     if expected.starts_with('/') {
         actual == expected
@@ -110,10 +174,8 @@ fn executable_matches(actual: &str, expected: &str) -> bool {
 
 /// Kill a harness left running by a previous run that died without cleanup.
 ///
-/// The pid file records the interpreter we spawned, and we only signal a pid
-/// whose live executable still matches it exactly. That makes a recycled pid —
-/// which would otherwise mean killing an unrelated program — effectively
-/// impossible to act on.
+/// Only signals a pid whose live executable still matches the interpreter we
+/// recorded, so a recycled pid cannot cause an unrelated program to be killed.
 fn reap_orphaned_sidecar() {
     let path = pid_file_path();
     let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -128,7 +190,6 @@ fn reap_orphaned_sidecar() {
     let Ok(pid) = pid_field.parse::<i32>() else {
         return;
     };
-    // No such process, or the pid now belongs to something else entirely.
     if !process_executable(pid).is_some_and(|actual| executable_matches(&actual, expected_exe)) {
         return;
     }
@@ -177,7 +238,7 @@ fn login_shell_path() -> Option<String> {
 /// The authenticated URL printed once the server has bound.
 ///
 /// The line may append a LAN URL in parentheses; `split_whitespace` drops it.
-/// We require the loopback host and a token so a stray log line can never
+/// Requiring the loopback host and a token means a stray log line can never
 /// redirect the window somewhere unexpected.
 fn extract_url(line: &str) -> Option<String> {
     let rest = line.split_once(URL_MARKER)?.1;
@@ -190,10 +251,8 @@ fn extract_url(line: &str) -> Option<String> {
     }
 }
 
-/// Open the real window on the harness URL and retire the loading window.
-///
-/// Window creation must happen on the main thread, hence `run_on_main_thread`.
-fn open_main_window(app: &tauri::AppHandle, url: &str) {
+/// Point the agent webview at the harness.
+fn open_harness(app: &tauri::AppHandle, url: &str) {
     let parsed = match tauri::Url::parse(url) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -201,28 +260,71 @@ fn open_main_window(app: &tauri::AppHandle, url: &str) {
             return;
         }
     };
-
-    let dispatcher = app.clone();
-    let window_app = app.clone();
-    let result = dispatcher.run_on_main_thread(move || {
-        match WebviewWindowBuilder::new(&window_app, "main", WebviewUrl::External(parsed))
-            .title("DSH Desktop")
-            .inner_size(1280.0, 860.0)
-            .min_inner_size(720.0, 480.0)
-            .build()
-        {
-            Ok(_) => {
-                if let Some(loading) = window_app.get_webview_window("loading") {
-                    let _ = loading.close();
-                }
+    match app.get_webview(AGENT) {
+        Some(webview) => {
+            if let Err(error) = webview.navigate(parsed) {
+                report_failure(app, &format!("could not load the harness UI: {error}"));
+            } else {
+                report_status(app, "");
             }
-            Err(error) => eprintln!("[shell] failed to open the main window: {error}"),
         }
-    });
-
-    if let Err(error) = result {
-        eprintln!("[shell] could not dispatch window creation: {error}");
+        None => report_failure(app, "agent webview is missing"),
     }
+}
+
+/// The isolated `DSH_HOME` this app owns.
+///
+/// An explicit `DSH_HOME` still wins, which keeps the development loop and the
+/// test suite able to redirect it.
+fn harness_home(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if let Ok(existing) = std::env::var("DSH_HOME") {
+        if !existing.trim().is_empty() {
+            return Ok(PathBuf::from(existing));
+        }
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("could not resolve the application data directory: {e}"))?;
+    Ok(data_dir.join("harness"))
+}
+
+/// Create this app's profile from the shipped template on first run.
+///
+/// Uses the CLI's own `--from-default-profile` rather than writing the profile
+/// files here, so the bundle list stays owned by dsh and cannot drift. `--help`
+/// makes the booted app print usage and exit without binding a server.
+fn ensure_profile(node: &str, bin: &str, home: &Path) -> Result<(), String> {
+    let profile_dir = home.join("profiles").join(PROFILE_NAME);
+    if profile_dir.join("package.json").exists() {
+        return Ok(());
+    }
+
+    eprintln!("[shell] initializing profile '{PROFILE_NAME}' from template '{PROFILE_TEMPLATE}'");
+    let output = Command::new(node)
+        .arg(bin)
+        .args([
+            "--profile",
+            PROFILE_NAME,
+            "--from-default-profile",
+            PROFILE_TEMPLATE,
+            "--help",
+        ])
+        .env("DSH_HOME", home)
+        .output()
+        .map_err(|e| format!("could not initialize the harness profile: {e}"))?;
+
+    if !profile_dir.join("package.json").exists() {
+        let stderr: String = String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .take(800)
+            .collect();
+        return Err(format!(
+            "harness profile initialization failed (exit {:?})\n{stderr}",
+            output.status.code()
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the interpreter and dsh entry script to run.
@@ -278,63 +380,6 @@ fn bootstrap(app: tauri::AppHandle) {
     run_sidecar(app, node, bin, home);
 }
 
-/// The isolated `DSH_HOME` this app owns.
-///
-/// Everything the harness persists — profiles, sessions, `settings.yaml`,
-/// `.credentials.yaml`, patches — hangs off this one root, so pointing it
-/// somewhere private is what makes the app self-contained. An explicit
-/// `DSH_HOME` still wins, which keeps the development loop and the test suite
-/// able to redirect it.
-fn harness_home(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    if let Ok(existing) = std::env::var("DSH_HOME") {
-        if !existing.trim().is_empty() {
-            return Ok(PathBuf::from(existing));
-        }
-    }
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("could not resolve the application data directory: {e}"))?;
-    Ok(data_dir.join("harness"))
-}
-
-/// Create this app's profile from the shipped template on first run.
-///
-/// Uses the CLI's own `--from-default-profile` rather than writing the profile
-/// files here, so the bundle list and patch scaffolding stay owned by dsh and
-/// cannot drift from it. `--help` makes the booted app print usage and exit
-/// without binding: the web surface provides neither `cmdlineArgs`-driven
-/// service on that path, so no server ever listens.
-fn ensure_profile(node: &str, bin: &str, home: &Path) -> Result<(), String> {
-    let profile_dir = home.join("profiles").join(PROFILE_NAME);
-    if profile_dir.join("package.json").exists() {
-        return Ok(());
-    }
-
-    eprintln!("[shell] initializing profile '{PROFILE_NAME}' from template '{PROFILE_TEMPLATE}'");
-    let output = Command::new(node)
-        .arg(bin)
-        .args([
-            "--profile",
-            PROFILE_NAME,
-            "--from-default-profile",
-            PROFILE_TEMPLATE,
-            "--help",
-        ])
-        .env("DSH_HOME", home)
-        .output()
-        .map_err(|e| format!("could not initialize the harness profile: {e}"))?;
-
-    if !profile_dir.join("package.json").exists() {
-        let stderr: String = String::from_utf8_lossy(&output.stderr).chars().take(800).collect();
-        return Err(format!(
-            "harness profile initialization failed (exit {:?})\n{stderr}",
-            output.status.code()
-        ));
-    }
-    Ok(())
-}
-
 fn run_sidecar(app: tauri::AppHandle, node: String, bin: String, home: PathBuf) {
     let mut command = Command::new(&node);
     command
@@ -383,8 +428,8 @@ fn run_sidecar(app: tauri::AppHandle, node: String, bin: String, home: PathBuf) 
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             println!("[dsh] {line}");
             if let Some(url) = extract_url(&line) {
-                println!("[shell] harness ready, opening window");
-                open_main_window(&app, &url);
+                println!("[shell] harness ready");
+                open_harness(&app, &url);
             }
         }
     }
@@ -407,7 +452,6 @@ fn stop_sidecar() {
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
-        // Give the harness a moment to shut down cleanly before reaping.
         for _ in 0..50 {
             match child.try_wait() {
                 Ok(Some(_)) => {
@@ -425,19 +469,118 @@ fn stop_sidecar() {
     }
 }
 
+// --- tab commands -----------------------------------------------------------
+
+/// Create the terminal webview the first time it is needed.
+///
+/// Lazy on purpose: the terminal is an opt-in component, so the base app never
+/// pays for it at startup.
+fn ensure_terminal(app: &tauri::AppHandle) -> Result<(), String> {
+    if app.get_webview(TERMINAL).is_some() {
+        return Ok(());
+    }
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "main window is missing".to_owned())?;
+    let size = window
+        .inner_size()
+        .map_err(|e| format!("could not size the terminal: {e}"))?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let bar = (TAB_BAR_HEIGHT * scale).round().max(1.0) as u32;
+
+    window
+        .add_child(
+            tauri::webview::WebviewBuilder::new(
+                TERMINAL,
+                WebviewUrl::App("terminal.html".into()),
+            ),
+            PhysicalPosition::new(0, bar as i32),
+            PhysicalSize::new(size.width, size.height.saturating_sub(bar)),
+        )
+        .map_err(|e| format!("could not create the terminal webview: {e}"))?;
+    Ok(())
+}
+
+/// Switch the visible tab.
+///
+/// The tab strip only repaints after this returns, so the bar can never claim a
+/// tab that is not actually on screen.
+#[tauri::command]
+fn select_tab(app: tauri::AppHandle, tab: String) -> Result<(), String> {
+    match tab.as_str() {
+        "agent" => {
+            if let Some(terminal) = app.get_webview(TERMINAL) {
+                let _ = terminal.hide();
+            }
+            if let Some(agent) = app.get_webview(AGENT) {
+                let _ = agent.show();
+            }
+            Ok(())
+        }
+        "terminal" => {
+            ensure_terminal(&app)?;
+            if let Some(agent) = app.get_webview(AGENT) {
+                let _ = agent.hide();
+            }
+            if let Some(terminal) = app.get_webview(TERMINAL) {
+                let _ = terminal.show();
+            }
+            Ok(())
+        }
+        other => Err(format!("unknown tab {other:?}")),
+    }
+}
+
+/// Short status line shown at the right of the tab strip.
+#[tauri::command]
+fn shell_status() -> String {
+    if SIDECAR.lock().map(|guard| guard.is_some()).unwrap_or(false) {
+        String::new()
+    } else {
+        "Starting…".to_owned()
+    }
+}
+
 fn main() {
     // Before anything else: a previous run may have died without cleanup.
     reap_orphaned_sidecar();
 
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![select_tab, shell_status])
         .setup(|app| {
-            // A small loading window while the runtime is acquired and the
-            // harness boots. The real window is created once the URL is known.
-            WebviewWindowBuilder::new(app, "loading", WebviewUrl::App("index.html".into()))
+            let window = tauri::window::WindowBuilder::new(app, "main")
                 .title("DSH Desktop")
-                .inner_size(460.0, 300.0)
-                .resizable(false)
+                .inner_size(1280.0, 860.0)
+                .min_inner_size(720.0, 480.0)
                 .build()?;
+
+            let size = window.inner_size()?;
+            let scale = window.scale_factor()?;
+            let bar = (TAB_BAR_HEIGHT * scale).round().max(1.0) as u32;
+
+            // The tab strip. This is the only surface granted IPC.
+            window.add_child(
+                tauri::webview::WebviewBuilder::new(
+                    CHROME,
+                    WebviewUrl::App("index.html".into()),
+                ),
+                PhysicalPosition::new(0, 0),
+                PhysicalSize::new(size.width, bar),
+            )?;
+
+            // The harness. A remote origin, granted nothing.
+            window.add_child(
+                tauri::webview::WebviewBuilder::new(AGENT, WebviewUrl::App("content.html".into())),
+                PhysicalPosition::new(0, bar as i32),
+                PhysicalSize::new(size.width, size.height.saturating_sub(bar)),
+            )?;
+
+            let handle = app.handle().clone();
+            window.on_window_event(move |event| {
+                if let WindowEvent::Resized(size) = event {
+                    layout(&handle, *size);
+                }
+            });
 
             let handle = app.handle().clone();
             std::thread::spawn(move || bootstrap(handle));

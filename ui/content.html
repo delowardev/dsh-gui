@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Starting</title>
+    <style>
+      :root { color-scheme: light dark; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .spinner {
+        width: 22px; height: 22px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        opacity: 0.7;
+        animation: spin 0.7s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .label { opacity: 0.8; }
+      .track {
+        width: 260px; height: 4px; border-radius: 2px;
+        background: color-mix(in srgb, currentColor 15%, transparent);
+        overflow: hidden; display: none;
+      }
+      .bar { height: 100%; width: 0%; background: currentColor; transition: width 0.2s ease; }
+      .detail { opacity: 0.5; font-size: 11px; min-height: 1.2em; }
+      .error {
+        display: none; max-width: 420px; padding: 10px 12px; border-radius: 6px;
+        font-size: 11px; white-space: pre-wrap; word-break: break-word;
+        background: color-mix(in srgb, #ff3b30 15%, transparent);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="spinner" id="spinner"></div>
+    <div class="label" id="label">Starting DeepSeek Harness…</div>
+    <div class="track" id="track"><div class="bar" id="bar"></div></div>
+    <div class="detail" id="detail">First launch downloads the runtime (~66 MB).</div>
+    <pre class="error" id="error"></pre>
+
+    <script>
+      // Driven from Rust via `eval`; this page is granted no IPC.
+      const label = document.getElementById("label");
+      const detail = document.getElementById("detail");
+      const track = document.getElementById("track");
+      const bar = document.getElementById("bar");
+      const errorBox = document.getElementById("error");
+
+      window.__dshProgress = (fraction, message) => {
+        if (typeof message === "string" && message) label.textContent = message;
+        if (typeof fraction === "number" && fraction >= 0) {
+          track.style.display = "block";
+          bar.style.width = Math.round(Math.min(fraction, 1) * 100) + "%";
+        } else {
+          track.style.display = "none";
+        }
+      };
+
+      window.__dshFailure = (message) => {
+        document.getElementById("spinner").style.display = "none";
+        track.style.display = "none";
+        label.textContent = "Could not start DeepSeek Harness";
+        detail.textContent = "";
+        errorBox.style.display = "block";
+        errorBox.textContent = message;
+      };
+    </script>
+  </body>
+</html>
