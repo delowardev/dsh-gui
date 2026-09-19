@@ -20,17 +20,42 @@ to your `PATH`.
 
 ## Install
 
-Early builds are **unsigned**, so macOS Gatekeeper will refuse them on first
-open. Either right-click the app and choose **Open**, or clear the quarantine
-flag:
+### Install with one command (recommended)
 
 ```sh
-xattr -dr com.apple.quarantine "/Applications/DSH GUI.app"
+curl -fsSL https://raw.githubusercontent.com/delowardev/dsh-gui/main/install.sh | bash
 ```
 
-Only `darwin-arm64` runtime payloads are published today, so Apple Silicon is
-the supported target. An Intel build needs the `darwin-x64` payload assembled
-and released first.
+This downloads the release, **verifies it against the published SHA-256**, and
+installs to `/Applications` (or `~/Applications` if that isn't writable).
+
+It is also the only path that starts without a Gatekeeper prompt, and that is
+deliberate rather than a trick:
+
+- The app is not signed with a Developer ID and not notarized, so macOS refuses
+  it on first launch.
+- What macOS actually acts on is the `com.apple.quarantine` attribute, and that
+  is applied by **the application doing the download** — browsers opt in, `curl`
+  does not.
+- Gatekeeper only assesses quarantined apps, so a copy fetched with `curl` is
+  never assessed.
+
+The published SHA-256 is therefore what stands in for a code signature, which
+is why the installer refuses to proceed without it.
+
+### Or install from the DMG
+
+Download the DMG, drag the app to Applications, then **right-click → Open** the
+first time (a browser download *is* quarantined). Alternatively:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness (unofficial).app"
+```
+
+### Requirements
+
+Apple Silicon. Only `darwin-arm64` runtime payloads are published; an Intel
+build needs the `darwin-x64` payload assembled and released first.
 
 ## First launch
 
