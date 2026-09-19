@@ -36,6 +36,21 @@
         font-size: 11px; white-space: pre-wrap; word-break: break-word;
         background: color-mix(in srgb, #ff3b30 15%, transparent);
       }
+      #retry {
+        display: none;
+        margin-top: 2px;
+        padding: 6px 18px;
+        border-radius: 6px;
+        border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+        background: color-mix(in srgb, currentColor 10%, transparent);
+        color: inherit;
+        font: inherit;
+        font-size: 12px;
+        cursor: default;
+      }
+      #retry:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
+      #retry[disabled] { opacity: 0.5; }
+      #retry.visible { display: block; }
     </style>
   </head>
   <body>
@@ -44,14 +59,20 @@
     <div class="track" id="track"><div class="bar" id="bar"></div></div>
     <div class="detail" id="detail"></div>
     <pre class="error" id="error"></pre>
+    <button id="retry">Retry</button>
 
     <script>
-      // Driven from Rust via `eval`; this page is granted no IPC.
+      // Progress and failure are driven from Rust via `eval`. Retry goes the
+      // other way and needs IPC, which is granted to this webview only for
+      // `retry_setup`.
+      const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+
       const label = document.getElementById("label");
       const detail = document.getElementById("detail");
       const track = document.getElementById("track");
       const bar = document.getElementById("bar");
       const errorBox = document.getElementById("error");
+      const retry = document.getElementById("retry");
 
       window.__dshProgress = (fraction, message) => {
         if (typeof message === "string" && message) label.textContent = message;
@@ -61,6 +82,11 @@
         } else {
           track.style.display = "none";
         }
+        // A retry puts us back into a working state, so clear the failure UI.
+        document.getElementById("spinner").style.display = "";
+        errorBox.style.display = "none";
+        retry.classList.remove("visible");
+        retry.disabled = false;
       };
 
       window.__dshFailure = (message) => {
@@ -70,7 +96,23 @@
         detail.textContent = "";
         errorBox.style.display = "block";
         errorBox.textContent = message;
+        retry.classList.add("visible");
+        retry.disabled = false;
       };
+
+      retry.addEventListener("click", async () => {
+        retry.disabled = true;
+        label.textContent = "Trying again…";
+        detail.textContent = "";
+        errorBox.style.display = "none";
+        try {
+          await invoke("retry_setup");
+        } catch (error) {
+          retry.disabled = false;
+          errorBox.style.display = "block";
+          errorBox.textContent = String(error);
+        }
+      });
     </script>
   </body>
 </html>

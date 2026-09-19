@@ -97,7 +97,17 @@
       #area { position: relative; flex: 1; overflow: hidden; }
       .pane { position: absolute; inset: 0; display: none; }
       .pane[data-active="true"] { display: block; }
-      .pane .xterm { height: 100%; }
+      /* Padding goes on the terminal element, not a wrapper. FitAddon reads the
+         parent's height and subtracts the terminal element's own padding, so
+         this is the one place it can live without the grid being measured
+         against a box the text does not actually occupy. `border-box` keeps the
+         100% height inclusive of it. Padding belongs here rather than on #area
+         so the sidebar stays flush. */
+      .pane .xterm {
+        height: 100%;
+        box-sizing: border-box;
+        padding: 6px 8px;
+      }
 
       /* xterm.css hardcodes `.xterm-viewport { background-color: #000 }` and
          `overflow-y: scroll`, which showed through as a black band below the

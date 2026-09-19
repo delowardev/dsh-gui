@@ -33,6 +33,7 @@ mod terminal;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -96,6 +97,10 @@ document.addEventListener(
 
 /// The sidecar handle, owned for the lifetime of the process.
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
+
+/// Guards against two bootstraps running at once — the loading page's Retry
+/// button is a button, and buttons get double-clicked.
+static BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 
 // --- window layout ----------------------------------------------------------
 
@@ -458,7 +463,20 @@ fn resolve_runtime(app: &tauri::AppHandle) -> Result<(String, String), String> {
     ))
 }
 
+/// Run one bootstrap at a time, on a background thread.
+fn start_bootstrap(app: tauri::AppHandle) {
+    if BOOTSTRAPPING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        bootstrap(app);
+        BOOTSTRAPPING.store(false, Ordering::SeqCst);
+    });
+}
+
 /// Acquire the runtime, prepare the isolated harness home, then spawn.
+///
+/// Runs on a background thread; `start_bootstrap` owns the one-at-a-time guard.
 fn bootstrap(app: tauri::AppHandle) {
     let (node, bin) = match resolve_runtime(&app) {
         Ok(pair) => pair,
@@ -687,6 +705,19 @@ fn shell_status(webview: tauri::Webview) -> Result<String, String> {
     )
 }
 
+/// Re-run setup after a failure.
+///
+/// Automatic retries cover a flaky connection; this covers the case where the
+/// user fixed the cause (reconnected, left a VPN) and should not have to quit
+/// and relaunch. Downloads resume, so a retry is not a fresh 66 MiB.
+#[tauri::command]
+fn retry_setup(app: tauri::AppHandle, webview: tauri::Webview) -> Result<(), String> {
+    assert_caller(&webview, &[LOADING])?;
+    eprintln!("[shell] retrying setup at the user's request");
+    start_bootstrap(app);
+    Ok(())
+}
+
 // --- terminal commands ------------------------------------------------------
 //
 // The emulator front-end is vendored into `ui/vendor`, so there is no install
@@ -750,6 +781,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             select_tab,
             shell_status,
+            retry_setup,
             terminal_open,
             terminal_list,
             terminal_write,
@@ -819,8 +851,7 @@ fn main() {
                 }
             });
 
-            let handle = app.handle().clone();
-            std::thread::spawn(move || bootstrap(handle));
+            start_bootstrap(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
