@@ -10,3 +10,5 @@ PLAN.md
 TODO.md
 .dev-home3
 .app-data
+.pnpm-store
+.pnpm-cache

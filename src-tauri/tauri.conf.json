@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DSH Desktop",
+  "productName": "DSH GUI",
   "version": "0.1.0",
-  "identifier": "com.dshdesktop.spike",
+  "identifier": "io.github.delowardev.dshgui",
   "build": {
     "frontendDist": "../ui"
   },
@@ -15,13 +15,20 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "DeveloperTool",
+    "shortDescription": "A lightweight desktop shell for DeepSeek Harness",
+    "longDescription": "Community desktop shell for DeepSeek Harness (dsh). Brings the harness into a native window with an agent surface and a terminal, downloading its runtime on first launch so no system Node install is required. Not an official DeepSeek AI product.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.png"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   }
 }
