@@ -28,6 +28,7 @@
 //!   6. stop it gracefully on exit, and never leave an orphan
 
 mod runtime;
+mod terminal;
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -72,6 +73,26 @@ const CHROME: &str = "chrome";
 const LOADING: &str = "loading";
 const AGENT: &str = "agent";
 const TERMINAL: &str = "terminal";
+
+/// Suppress the right-click menu in every webview.
+///
+/// On macOS that menu offers "Inspect Element", which is a window into the
+/// app's internals that a shipped app has no reason to expose. Applied to the
+/// harness page too: the page we did not write is exactly the one whose
+/// internals should not be a right-click away.
+///
+/// This is the *visible* half of the decision. The other half is that devtools
+/// are compiled out of release builds entirely (Tauri's `devtools` feature is
+/// opt-in, and we do not enable it), so keyboard shortcuts cannot reach them
+/// either. Debug builds keep devtools on purpose — losing them would cost us
+/// more than it protects, and they are never shipped.
+const BLOCK_CONTEXT_MENU: &str = r#"
+document.addEventListener(
+  "contextmenu",
+  (event) => event.preventDefault(),
+  { capture: true },
+);
+"#;
 
 /// The sidecar handle, owned for the lifetime of the process.
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
@@ -330,7 +351,8 @@ fn open_harness(app: &tauri::AppHandle, url: &str) {
         let rail = (RAIL_WIDTH * scale).round().max(1.0) as u32;
 
         match window.add_child(
-            tauri::webview::WebviewBuilder::new(AGENT, WebviewUrl::External(parsed)),
+            tauri::webview::WebviewBuilder::new(AGENT, WebviewUrl::External(parsed))
+                .initialization_script(BLOCK_CONTEXT_MENU),
             PhysicalPosition::new(0, bar as i32),
             PhysicalSize::new(size.width.saturating_sub(rail), size.height.saturating_sub(bar)),
         ) {
@@ -573,7 +595,8 @@ fn ensure_terminal(app: &tauri::AppHandle) -> Result<(), String> {
             tauri::webview::WebviewBuilder::new(
                 TERMINAL,
                 WebviewUrl::App("terminal.html".into()),
-            ),
+            )
+            .initialization_script(BLOCK_CONTEXT_MENU),
             PhysicalPosition::new(0, bar as i32),
             PhysicalSize::new(size.width.saturating_sub(rail), size.height.saturating_sub(bar)),
         )
@@ -581,12 +604,47 @@ fn ensure_terminal(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Only our own surfaces may drive a command.
+///
+/// Custom commands are invokable by *every* webview by default — including the
+/// remote harness page. For tab switching that is merely untidy; for the
+/// terminal commands it would hand a shell to whatever the harness happens to be
+/// rendering. Checking the caller here is what keeps that boundary shut. (An ACL
+/// capability scoped by webview label enforces the same thing; this is explicit
+/// and stays auditable in one place.)
+fn assert_caller(webview: &tauri::Webview, allowed: &[&str]) -> Result<(), String> {
+    let label = webview.label();
+    if allowed.contains(&label) {
+        return Ok(());
+    }
+    Err(format!(
+        "webview {label:?} is not permitted to call this command"
+    ))
+}
+
+/// The directory this app owns for installed extras.
+///
+/// `DSH_APP_DATA_DIR` overrides it, which keeps the development loop and the
+/// test suite able to redirect installs without touching the real app data.
+fn app_data(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if let Ok(override_dir) = std::env::var("DSH_APP_DATA_DIR") {
+        if !override_dir.trim().is_empty() {
+            return Ok(PathBuf::from(override_dir));
+        }
+    }
+    app.path()
+        .app_data_dir()
+        .map_err(|e| format!("could not resolve the application data directory: {e}"))
+}
+
 /// Switch the visible tab.
 ///
-/// The tab strip only repaints after this returns, so the bar can never claim a
-/// tab that is not actually on screen.
+/// The rail only repaints after this returns, so it can never claim a tab that
+/// is not actually on screen. The shell is deliberately *not* stopped here:
+/// hiding the terminal should not discard the session.
 #[tauri::command]
-fn select_tab(app: tauri::AppHandle, tab: String) -> Result<(), String> {
+fn select_tab(app: tauri::AppHandle, webview: tauri::Webview, tab: String) -> Result<(), String> {
+    assert_caller(&webview, &[CHROME])?;
     match tab.as_str() {
         "agent" => {
             if let Some(terminal) = app.get_webview(TERMINAL) {
@@ -611,14 +669,95 @@ fn select_tab(app: tauri::AppHandle, tab: String) -> Result<(), String> {
     }
 }
 
-/// Short status line shown at the right of the tab strip.
+/// Whether the harness process is up yet.
 #[tauri::command]
-fn shell_status() -> String {
-    if SIDECAR.lock().map(|guard| guard.is_some()).unwrap_or(false) {
-        String::new()
-    } else {
-        "Starting…".to_owned()
-    }
+fn shell_status(webview: tauri::Webview) -> Result<String, String> {
+    assert_caller(&webview, &[CHROME])?;
+    Ok(
+        if SIDECAR.lock().map(|guard| guard.is_some()).unwrap_or(false) {
+            String::new()
+        } else {
+            "Starting…".to_owned()
+        },
+    )
+}
+
+// --- terminal commands ------------------------------------------------------
+
+#[tauri::command]
+fn terminal_status(app: tauri::AppHandle, webview: tauri::Webview) -> Result<bool, String> {
+    assert_caller(&webview, &[TERMINAL])?;
+    Ok(terminal::is_installed(&terminal::install_root(&app_data(&app)?)))
+}
+
+/// Download the terminal front-end.
+///
+/// The PTY side is already compiled in; this is the part kept out of the base
+/// install, pinned by digest in `src/terminal.rs`.
+#[tauri::command]
+fn terminal_install(app: tauri::AppHandle, webview: tauri::Webview) -> Result<(), String> {
+    assert_caller(&webview, &[TERMINAL])?;
+    terminal::install(&app_data(&app)?)
+        .inspect_err(|error| eprintln!("[shell] terminal install failed: {error}"))
+}
+
+#[tauri::command]
+fn terminal_assets(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<terminal::Assets, String> {
+    assert_caller(&webview, &[TERMINAL])?;
+    terminal::assets(&app_data(&app)?)
+}
+
+#[tauri::command]
+fn terminal_open(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    cols: u16,
+    rows: u16,
+) -> Result<String, String> {
+    assert_caller(&webview, &[TERMINAL])?;
+    terminal::open(&app_data(&app)?, login_shell_path(), cols, rows)
+        .inspect_err(|error| eprintln!("[shell] terminal open failed: {error}"))
+}
+
+#[tauri::command]
+fn terminal_list(webview: tauri::Webview) -> Result<Vec<terminal::SessionInfo>, String> {
+    assert_caller(&webview, &[TERMINAL])?;
+    Ok(terminal::list())
+}
+
+#[tauri::command]
+fn terminal_write(webview: tauri::Webview, id: String, data: String) -> Result<(), String> {
+    assert_caller(&webview, &[TERMINAL])?;
+    terminal::write(&id, &data)
+}
+
+/// Drain one session's buffered output. Polled by the page — see the note in
+/// `src/terminal.rs` for why this is not an event stream.
+#[tauri::command]
+fn terminal_read(webview: tauri::Webview, id: String) -> Result<String, String> {
+    assert_caller(&webview, &[TERMINAL])?;
+    Ok(terminal::read(&id))
+}
+
+#[tauri::command]
+fn terminal_resize(
+    webview: tauri::Webview,
+    id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    assert_caller(&webview, &[TERMINAL])?;
+    terminal::resize(&id, cols, rows)
+}
+
+#[tauri::command]
+fn terminal_close(webview: tauri::Webview, id: String) -> Result<(), String> {
+    assert_caller(&webview, &[TERMINAL])?;
+    terminal::close(&id);
+    Ok(())
 }
 
 fn main() {
@@ -626,7 +765,19 @@ fn main() {
     reap_orphaned_sidecar();
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![select_tab, shell_status])
+        .invoke_handler(tauri::generate_handler![
+            select_tab,
+            shell_status,
+            terminal_status,
+            terminal_install,
+            terminal_assets,
+            terminal_open,
+            terminal_list,
+            terminal_write,
+            terminal_read,
+            terminal_resize,
+            terminal_close
+        ])
         .setup(|app| {
             // Overlay title bar: transparent, with the content view spanning the
             // whole window. Without this, Tauri still enables a fullsize content
@@ -654,14 +805,16 @@ fn main() {
             // instead of an opaque strip beside the content.
             window.add_child(
                 tauri::webview::WebviewBuilder::new(CHROME, WebviewUrl::App("index.html".into()))
-                    .transparent(true),
+                    .transparent(true)
+                    .initialization_script(BLOCK_CONTEXT_MENU),
                 PhysicalPosition::new(1232, 0),
                 PhysicalSize::new(48, 860),
             )?;
 
             // Startup progress. Closed once the harness webview exists.
             window.add_child(
-                tauri::webview::WebviewBuilder::new(LOADING, WebviewUrl::App("content.html".into())),
+                tauri::webview::WebviewBuilder::new(LOADING, WebviewUrl::App("content.html".into()))
+                    .initialization_script(BLOCK_CONTEXT_MENU),
                 PhysicalPosition::new(0, 28),
                 PhysicalSize::new(1232, 832),
             )?;
@@ -696,6 +849,7 @@ fn main() {
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
                 stop_sidecar();
+                terminal::close_all();
             }
         });
 }

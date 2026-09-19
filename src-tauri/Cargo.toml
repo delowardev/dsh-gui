@@ -41,5 +41,11 @@ sha2 = "0.10"
 tar = "0.4"
 flate2 = "1"
 
+# Real PTY for the terminal tab. Compiled in and unconditional; only the
+# emulator front-end is downloaded on demand (src/terminal.rs).
+portable-pty = "0.9.0"
+# Fonts are handed to the page as data: URLs.
+base64 = "0.22"
+
 [profile.dev]
 incremental = true

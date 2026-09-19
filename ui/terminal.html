@@ -7,46 +7,459 @@
       :root { color-scheme: light dark; }
       html, body { height: 100%; margin: 0; }
       body {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font: 13px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        overflow: hidden;
       }
-      .card { max-width: 380px; text-align: center; display: flex; flex-direction: column; gap: 10px; }
-      h1 { font-size: 14px; margin: 0; font-weight: 600; }
-      p { margin: 0; opacity: 0.65; font-size: 12px; }
-      button {
-        align-self: center;
-        margin-top: 6px;
-        padding: 7px 16px;
-        border-radius: 6px;
+
+      /* ---- install state ---- */
+      #install { height: 100%; display: flex; align-items: center; justify-content: center; }
+      .card { max-width: 400px; text-align: center; display: flex; flex-direction: column; gap: 10px; }
+      .card h1 { font-size: 14px; margin: 0; font-weight: 600; }
+      .card p { margin: 0; opacity: 0.65; font-size: 12px; }
+      .card button {
+        align-self: center; margin-top: 6px; padding: 7px 16px; border-radius: 6px;
         border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
         background: color-mix(in srgb, currentColor 10%, transparent);
-        color: inherit;
-        font: inherit;
-        cursor: default;
+        color: inherit; font: inherit; cursor: default;
       }
-      button:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
-      .note { font-size: 11px; opacity: 0.45; }
+      .card button:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
+      .card button[disabled] { opacity: 0.5; }
+      .note { font-size: 11px; opacity: 0.45; min-height: 1.4em; white-space: pre-wrap; }
+
+      /* ---- session state ---- */
+      #session { display: none; height: 100%; }
+      #session.ready { display: flex; }
+
+      #sidebar {
+        width: 200px;
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        min-width: 120px;
+        background: color-mix(in srgb, currentColor 4%, transparent);
+        border-right: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+      }
+      #sidebar .head {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 6px 8px 6px 10px;
+        font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+        opacity: 0.5;
+      }
+      #sidebar .head button {
+        appearance: none; border: 0; background: none; color: inherit;
+        font: inherit; font-size: 15px; line-height: 1; padding: 2px 5px;
+        border-radius: 5px; cursor: default; opacity: 0.8;
+      }
+      #sidebar .head button:hover { background: color-mix(in srgb, currentColor 12%, transparent); opacity: 1; }
+      #list { list-style: none; margin: 0; padding: 0 6px 8px; overflow-y: auto; flex: 1; }
+      #list li {
+        display: flex; align-items: center; gap: 6px;
+        padding: 5px 6px 5px 9px; border-radius: 6px; cursor: default;
+        opacity: 0.65;
+      }
+      #list li:hover { background: color-mix(in srgb, currentColor 7%, transparent); opacity: 0.9; }
+      #list li[aria-selected="true"] {
+        opacity: 1;
+        background: color-mix(in srgb, currentColor 12%, transparent);
+      }
+      #list li .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #list li .kill {
+        appearance: none; border: 0; background: none; color: inherit;
+        font: inherit; font-size: 13px; line-height: 1; padding: 1px 4px;
+        border-radius: 4px; opacity: 0; cursor: default;
+      }
+      #list li:hover .kill { opacity: 0.6; }
+      #list li .kill:hover { background: color-mix(in srgb, currentColor 14%, transparent); opacity: 1; }
+
+      /* Drag to resize the sidebar. */
+      #splitter { width: 4px; flex: none; cursor: col-resize; }
+      #splitter:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
+
+      /* The terminal fills the remaining area exactly. No padding here: fit()
+         measures this box, so padding would make it compute one row too many
+         and leave a strip of background showing. */
+      #area { position: relative; flex: 1; overflow: hidden; }
+      .pane { position: absolute; inset: 0; display: none; }
+      .pane[data-active="true"] { display: block; }
+      .pane .xterm { height: 100%; }
+
+      /* xterm.css hardcodes `.xterm-viewport { background-color: #000 }` and
+         `overflow-y: scroll`, which showed through as a black band below the
+         last row and as a full-width native scrollbar. Both are overridden:
+         the viewport is transparent so the pane's theme colour shows, and the
+         scrollbar becomes a slim overlay. */
+      .pane .xterm-viewport {
+        background-color: transparent !important;
+        scrollbar-width: thin;
+      }
+      .pane .xterm-viewport::-webkit-scrollbar { width: 8px; }
+      .pane .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+      .pane .xterm-viewport::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.18);
+        border-radius: 4px;
+      }
+      .pane .xterm-viewport::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.32);
+      }
+
+      #empty {
+        position: absolute; inset: 0; display: none;
+        align-items: center; justify-content: center; opacity: 0.5;
+      }
+      #empty.visible { display: flex; }
+
+      #error {
+        display: none; position: absolute; left: 12px; right: 12px; bottom: 12px;
+        padding: 10px 12px; border-radius: 6px; font-size: 11px;
+        white-space: pre-wrap; word-break: break-word;
+        color: #fff; background: rgba(220, 50, 47, 0.92);
+      }
+      #error.visible { display: block; }
     </style>
   </head>
   <body>
-    <div class="card">
-      <h1>Terminal isn't installed</h1>
-      <p>
-        The terminal and its dependencies are downloaded on demand, so they stay
-        out of the base install.
-      </p>
-      <button id="install">Install terminal…</button>
-      <p class="note" id="note">Downloads a terminal UI bundle. Nothing else changes.</p>
+    <div id="install">
+      <div class="card">
+        <h1>Terminal isn't installed</h1>
+        <p>
+          The terminal UI is downloaded on demand so it stays out of the base
+          install. The shell itself runs locally.
+        </p>
+        <button id="install-button">Install terminal</button>
+        <p class="note" id="note">Roughly 500 KB, verified against pinned digests.</p>
+      </div>
+    </div>
+
+    <div id="session">
+      <aside id="sidebar">
+        <div class="head"><span>Terminals</span><button id="new" title="New terminal">+</button></div>
+        <ul id="list"></ul>
+      </aside>
+      <div id="splitter" title="Drag to resize"></div>
+      <div id="area">
+        <div id="empty">No terminals open</div>
+        <div id="error"></div>
+      </div>
     </div>
 
     <script>
-      // This page is a local surface, but the install path is owned by Rust.
+      // A local surface. Terminal commands are accepted only from this webview.
+      const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+
       const note = document.getElementById("note");
-      document.getElementById("install").addEventListener("click", () => {
-        note.textContent = "Not implemented yet — coming in the terminal phase.";
+      const installView = document.getElementById("install");
+      const sessionView = document.getElementById("session");
+      const errorView = document.getElementById("error");
+      const listView = document.getElementById("list");
+      const areaView = document.getElementById("area");
+      const emptyView = document.getElementById("empty");
+
+      /** id -> { id, title, term, fit, pane } */
+      const sessions = new Map();
+      let activeId = null;
+      let polling = false;
+
+      function showError(message) {
+        errorView.textContent = message;
+        errorView.classList.add("visible");
+      }
+
+      // Vira Graphene, read from the installed theme's `terminal.ansi*` keys
+      // (vira.vsc-vira-theme 2026.9.2) rather than eyeballed from a screenshot,
+      // so every slot is the theme's own value. VS Code omits
+      // `terminal.background`/`foreground` here, which means the terminal
+      // inherits the editor colours — hence background/foreground below.
+      const THEME = {
+        background: "#212121",          // editor.background
+        foreground: "#D9D9D9",          // editor.foreground
+        cursor: "#FFCB6B",              // terminalCursor.foreground
+        cursorAccent: "#000000",        // terminalCursor.background
+        selectionBackground: "#47474780", // editor.selectionBackground
+        black: "#000000",
+        red: "#f07178",
+        green: "#C3E88D",
+        yellow: "#FFCB6B",
+        blue: "#82AAFF",
+        magenta: "#C792EA",
+        cyan: "#89DDFF",
+        white: "#ffffff",
+        brightBlack: "#545454",
+        brightRed: "#f07178",
+        brightGreen: "#C3E88D",
+        brightYellow: "#FFCB6B",
+        brightBlue: "#82AAFF",
+        brightMagenta: "#C792EA",
+        brightCyan: "#89DDFF",
+        brightWhite: "#ffffff",
+      };
+
+      const FONT_STACK = '"Monaspace Krypton", ui-monospace, SFMono-Regular, Menlo, monospace';
+
+      // One palette, used regardless of system appearance: the supplied colours
+      // are a dark theme and a terminal reads as dark by convention.
+      function theme() {
+        return THEME;
+      }
+
+      /** Wait for Monaspace Krypton, or the grid is measured against fallback
+       *  metrics — the cell size then changes under xterm once the font lands,
+       *  leaving the rows short of the container. */
+      async function ensureFonts() {
+        if (!document.fonts) return;
+        try {
+          await Promise.all([
+            document.fonts.load('400 12px "Monaspace Krypton"'),
+            document.fonts.load('italic 400 12px "Monaspace Krypton"'),
+            document.fonts.load('700 12px "Monaspace Krypton"'),
+            document.fonts.load('italic 700 12px "Monaspace Krypton"'),
+          ]);
+          await document.fonts.ready;
+        } catch {
+          // Fall through: a missing font degrades to the fallback stack.
+        }
+      }
+
+      function injectAssets(assets) {
+        // Monaspace Krypton (SIL OFL 1.1) ships with the terminal, not the base
+        // app, and arrives as data: URLs. `font-display: block` avoids a flash
+        // of fallback metrics, which would otherwise resize the grid on load.
+        const face = (source, weight, style) =>
+          `@font-face{font-family:"Monaspace Krypton";src:url(${source}) format("woff2");` +
+          `font-weight:${weight};font-style:${style};font-display:block;}`;
+
+        const style = document.createElement("style");
+        style.textContent =
+          face(assets.font_regular, 400, "normal") +
+          face(assets.font_regular_italic, 400, "italic") +
+          face(assets.font_bold, 700, "normal") +
+          face(assets.font_bold_italic, 700, "italic") +
+          assets.css;
+        document.head.appendChild(style);
+
+        // The pinned UMD builds attach `Terminal` and `FitAddon` to the page.
+        for (const source of [assets.xterm, assets.fit]) {
+          const script = document.createElement("script");
+          script.textContent = source;
+          document.head.appendChild(script);
+        }
+      }
+
+      function renderList() {
+        listView.replaceChildren();
+        for (const session of sessions.values()) {
+          const item = document.createElement("li");
+          item.setAttribute("aria-selected", String(session.id === activeId));
+          item.addEventListener("click", () => activate(session.id));
+
+          const name = document.createElement("span");
+          name.className = "name";
+          name.textContent = session.title;
+          item.appendChild(name);
+
+          const kill = document.createElement("button");
+          kill.className = "kill";
+          kill.textContent = "×";
+          kill.title = "Close terminal";
+          kill.addEventListener("click", (event) => {
+            event.stopPropagation();
+            closeSession(session.id);
+          });
+          item.appendChild(kill);
+
+          listView.appendChild(item);
+        }
+        emptyView.classList.toggle("visible", sessions.size === 0);
+      }
+
+      /** Attach xterm to a session the backend already knows about. */
+      function attach(info) {
+        const palette = theme();
+        const pane = document.createElement("div");
+        pane.className = "pane";
+        // Match the terminal background so any sub-cell remainder below the last
+        // row is invisible instead of reading as a black bar.
+        pane.style.background = palette.background;
+        areaView.insertBefore(pane, errorView);
+
+        const term = new window.Terminal({
+          fontFamily: FONT_STACK,
+          fontSize: 12,
+          fontWeight: 400,
+          fontWeightBold: 700,
+          lineHeight: 1.2,
+          letterSpacing: 0,
+          cursorBlink: true,
+          theme: palette,
+          scrollback: 5000,
+        });
+        const fit = new window.FitAddon.FitAddon();
+        term.loadAddon(fit);
+        term.open(pane);
+        // The pane is hidden until activated, so measuring now would give zero.
+        // It is fitted in `activate`.
+
+        sessions.set(info.id, { ...info, term, fit, pane });
+
+        term.onData((data) => invoke("terminal_write", { id: info.id, data }).catch(() => {}));
+        term.onResize(({ cols, rows }) =>
+          invoke("terminal_resize", { id: info.id, cols, rows }).catch(() => {}),
+        );
+      }
+
+      async function newSession() {
+        const current = activeId ? sessions.get(activeId) : null;
+        // Reuse the active size so a new pane does not visibly reflow.
+        const cols = current?.term.cols ?? 80;
+        const rows = current?.term.rows ?? 24;
+        try {
+          const id = await invoke("terminal_open", { cols, rows });
+          attach({ id, title: `Terminal ${sessions.size + 1}` });
+          await activate(id);
+        } catch (error) {
+          showError("Could not start a shell.\n" + String(error));
+        }
+      }
+
+      async function activate(id) {
+        if (!sessions.has(id)) return;
+        activeId = id;
+        for (const session of sessions.values()) {
+          const active = session.id === id;
+          session.pane.dataset.active = String(active);
+        }
+        renderList();
+        // Fit only once the pane is displayed, or the measurement is zero.
+        const session = sessions.get(id);
+        requestAnimationFrame(() => {
+          try {
+            session.fit.fit();
+          } catch {}
+          session.term.focus();
+        });
+      }
+
+      function closeSession(id) {
+        sessions.get(id)?.term.dispose();
+        sessions.get(id)?.pane.remove();
+        sessions.delete(id);
+        invoke("terminal_close", { id }).catch(() => {});
+        if (activeId === id) {
+          const next = sessions.keys().next();
+          activeId = next.done ? null : next.value;
+          if (activeId) activate(activeId);
+        }
+        renderList();
+      }
+
+      // Output is drained rather than pushed: a Tauri event stream is a
+      // core-plugin command and would need a capability, while these are our own
+      // commands. See the note in src-tauri/src/terminal.rs.
+      function startPolling() {
+        if (polling) return;
+        polling = true;
+        setInterval(async () => {
+          for (const session of sessions.values()) {
+            if (session.reading) continue;
+            session.reading = true;
+            try {
+              const chunk = await invoke("terminal_read", { id: session.id });
+              if (chunk) session.term.write(chunk);
+            } catch {
+              // Transient; keep polling.
+            } finally {
+              session.reading = false;
+            }
+          }
+        }, 25);
+      }
+
+      // Re-fit whenever the area actually changes size — window resize, sidebar
+      // drag, or the tab becoming visible. A window resize listener misses all
+      // but the first.
+      new ResizeObserver(() => {
+        const session = activeId ? sessions.get(activeId) : null;
+        if (!session) return;
+        try {
+          session.fit.fit();
+        } catch {}
+      }).observe(areaView);
+
+      // A late font swap changes cell metrics without resizing the container, so
+      // the ResizeObserver would never see it.
+      document.fonts?.addEventListener("loadingdone", () => {
+        const session = activeId ? sessions.get(activeId) : null;
+        if (!session) return;
+        try {
+          session.fit.fit();
+        } catch {}
       });
+
+      // --- sidebar drag ---
+      (() => {
+        const sidebar = document.getElementById("sidebar");
+        const splitter = document.getElementById("splitter");
+        let dragging = false;
+        splitter.addEventListener("mousedown", (event) => {
+          dragging = true;
+          event.preventDefault();
+        });
+        window.addEventListener("mousemove", (event) => {
+          if (!dragging) return;
+          const width = Math.min(Math.max(event.clientX, 120), 480);
+          sidebar.style.width = width + "px";
+        });
+        window.addEventListener("mouseup", () => { dragging = false; });
+      })();
+
+      document.getElementById("new").addEventListener("click", () => newSession());
+      document.getElementById("install-button").addEventListener("click", async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        note.textContent = "Downloading…";
+        try {
+          await invoke("terminal_install");
+          await boot();
+        } catch (error) {
+          note.textContent = String(error);
+          button.disabled = false;
+        }
+      });
+
+      async function boot() {
+        errorView.classList.remove("visible");
+        const assets = await invoke("terminal_assets");
+        injectAssets(assets);
+        // Must happen before any terminal measures itself.
+        await ensureFonts();
+
+        // Adopt the terminal palette for the whole page, so the sidebar is part
+        // of the terminal rather than app chrome sitting beside it. The sidebar
+        // derives its shades from currentColor, so it follows automatically.
+        const palette = theme();
+        document.body.style.background = palette.background;
+        document.body.style.color = palette.foreground;
+
+        // The container must be laid out *before* xterm measures itself.
+        installView.style.display = "none";
+        sessionView.classList.add("ready");
+
+        const existing = await invoke("terminal_list");
+        if (existing.length === 0) {
+          await newSession();
+        } else {
+          for (const info of existing) attach(info);
+          await activate(existing[0].id);
+        }
+        startPolling();
+      }
+
+      (async () => {
+        try {
+          if (await invoke("terminal_status")) await boot();
+        } catch (error) {
+          note.textContent = String(error);
+        }
+      })();
     </script>
   </body>
 </html>
