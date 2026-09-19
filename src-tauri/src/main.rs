@@ -28,6 +28,17 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 /// See `dsh-web-app/lib/index.js:203`: `dsh web: <url>[ (LAN: <url>)]`
 const URL_MARKER: &str = "dsh web: ";
 
+/// Profile this app owns.
+///
+/// Deliberately NOT `web`: sharing that profile would let a terminal `dsh web`
+/// and this app mutate each other's plugin state concurrently. Also NOT
+/// `desktop`, which the CLI reserves for the official Electron app and rejects
+/// for boot, config-dump, and plugin management alike.
+const PROFILE_NAME: &str = "tauri";
+
+/// Shipped template the owned profile is created from.
+const PROFILE_TEMPLATE: &str = "web";
+
 /// The sidecar handle, owned for the lifetime of the process.
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
 
@@ -240,7 +251,7 @@ fn resolve_runtime(app: &tauri::AppHandle) -> Result<(String, String), String> {
     ))
 }
 
-/// Acquire the runtime, then spawn the harness and stream its output.
+/// Acquire the runtime, prepare the isolated harness home, then spawn.
 fn bootstrap(app: tauri::AppHandle) {
     let (node, bin) = match resolve_runtime(&app) {
         Ok(pair) => pair,
@@ -249,16 +260,91 @@ fn bootstrap(app: tauri::AppHandle) {
             return;
         }
     };
-    run_sidecar(app, node, bin);
+
+    let home = match harness_home(&app) {
+        Ok(home) => home,
+        Err(error) => {
+            report_failure(&app, &error);
+            return;
+        }
+    };
+
+    report_progress(&app, 1.0, "Preparing harness…");
+    if let Err(error) = ensure_profile(&node, &bin, &home) {
+        report_failure(&app, &error);
+        return;
+    }
+
+    run_sidecar(app, node, bin, home);
 }
 
-fn run_sidecar(app: tauri::AppHandle, node: String, bin: String) {
+/// The isolated `DSH_HOME` this app owns.
+///
+/// Everything the harness persists — profiles, sessions, `settings.yaml`,
+/// `.credentials.yaml`, patches — hangs off this one root, so pointing it
+/// somewhere private is what makes the app self-contained. An explicit
+/// `DSH_HOME` still wins, which keeps the development loop and the test suite
+/// able to redirect it.
+fn harness_home(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if let Ok(existing) = std::env::var("DSH_HOME") {
+        if !existing.trim().is_empty() {
+            return Ok(PathBuf::from(existing));
+        }
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("could not resolve the application data directory: {e}"))?;
+    Ok(data_dir.join("harness"))
+}
+
+/// Create this app's profile from the shipped template on first run.
+///
+/// Uses the CLI's own `--from-default-profile` rather than writing the profile
+/// files here, so the bundle list and patch scaffolding stay owned by dsh and
+/// cannot drift from it. `--help` makes the booted app print usage and exit
+/// without binding: the web surface provides neither `cmdlineArgs`-driven
+/// service on that path, so no server ever listens.
+fn ensure_profile(node: &str, bin: &str, home: &Path) -> Result<(), String> {
+    let profile_dir = home.join("profiles").join(PROFILE_NAME);
+    if profile_dir.join("package.json").exists() {
+        return Ok(());
+    }
+
+    eprintln!("[shell] initializing profile '{PROFILE_NAME}' from template '{PROFILE_TEMPLATE}'");
+    let output = Command::new(node)
+        .arg(bin)
+        .args([
+            "--profile",
+            PROFILE_NAME,
+            "--from-default-profile",
+            PROFILE_TEMPLATE,
+            "--help",
+        ])
+        .env("DSH_HOME", home)
+        .output()
+        .map_err(|e| format!("could not initialize the harness profile: {e}"))?;
+
+    if !profile_dir.join("package.json").exists() {
+        let stderr: String = String::from_utf8_lossy(&output.stderr).chars().take(800).collect();
+        return Err(format!(
+            "harness profile initialization failed (exit {:?})\n{stderr}",
+            output.status.code()
+        ));
+    }
+    Ok(())
+}
+
+fn run_sidecar(app: tauri::AppHandle, node: String, bin: String, home: PathBuf) {
     let mut command = Command::new(&node);
     command
         .arg(&bin)
         // Launcher flags first; everything after reaches the web app
         // (`dsh --profile web --port 8080` is the documented shape).
-        .args(["--profile", "web", "--no-open", "--port", "0"])
+        .args(["--profile", PROFILE_NAME, "--no-open", "--port", "0"])
+        // Set explicitly rather than inherited: a user with DSH_HOME exported
+        // would otherwise silently break this app's isolation.
+        .env("DSH_HOME", &home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -269,6 +355,7 @@ fn run_sidecar(app: tauri::AppHandle, node: String, bin: String) {
     }
 
     eprintln!("[shell] spawning harness: {node}");
+    eprintln!("[shell]   DSH_HOME={}", home.display());
 
     let mut child = match command.spawn() {
         Ok(child) => child,
