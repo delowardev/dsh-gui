@@ -21,7 +21,13 @@ tauri-build = { version = "2", features = [] }
 # the question entirely (see PLAN.md §3). If this feature ever breaks, the
 # fallback is a stable build with the harness in an iframe — and the fence
 # behaviour of that path must be verified first.
-tauri = { version = "2.11.1", features = ["unstable"] }
+#
+# `macos-private-api` is what makes a transparent webview possible on macOS
+# (`WebviewBuilder::transparent` is gated behind it). We want it so the tab strip
+# can sit on the window's own background with no fill. Both reference
+# implementations enable this too. Trade-off: it uses private AppKit surface, so
+# it rules out Mac App Store distribution — which was never a target.
+tauri = { version = "2.11.1", features = ["unstable", "macos-private-api"] }
 # SIGTERM to the sidecar so dsh disposes its fiber tree gracefully (exit 0).
 libc = "0.2"
 

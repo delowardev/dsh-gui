@@ -3,12 +3,13 @@
 //! One window, several sibling webviews:
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────┐
-//! │ chrome   (tab bar, our page, IPC granted)    │  TAB_BAR_HEIGHT
-//! ├──────────────────────────────────────────────┤
-//! │ agent    (harness UI, remote origin, no IPC) │  rest
-//! │   or terminal (local page, no IPC)           │
-//! └──────────────────────────────────────────────┘
+//! ┌───────────────────────────────┬──────┐
+//! │ title bar band (window's own) │      │
+//! ├───────────────────────────────┤ rail │  <- tabs as icons;
+//! │ agent   (harness, remote)     │      │     our page, IPC granted
+//! │   or terminal (local)         │      │
+//! └───────────────────────────────┴──────┘
+//!        content: granted no IPC
 //! ```
 //!
 //! Multi-webview is used rather than an iframe on purpose: the harness page
@@ -38,8 +39,19 @@ use tauri::{
     Manager, PhysicalPosition, PhysicalSize, Position, Rect, Size, WebviewUrl, WindowEvent,
 };
 
-/// Height of the tab strip, in logical pixels.
-const TAB_BAR_HEIGHT: f64 = 38.0;
+/// Title bar clearance, in logical pixels.
+///
+/// Nothing of ours occupies this band: it is left to the window's own
+/// background so the native traffic lights sit where macOS puts them. The
+/// content starts below it, exactly as under a normal title bar.
+const TITLEBAR_HEIGHT: f64 = 28.0;
+
+/// Width of the right tab rail, in logical pixels.
+///
+/// The tabs live here as icons rather than in a top strip: a rail is not
+/// competing with the title bar for vertical space, and it scales to more
+/// surfaces later without crowding the chrome.
+const RAIL_WIDTH: f64 = 48.0;
 
 /// Printed by the `web-runtime` row once the server has bound.
 /// See `dsh-web-app/lib/index.js:203`: `dsh web: <url>[ (LAN: <url>)]`
@@ -57,6 +69,7 @@ const PROFILE_TEMPLATE: &str = "web";
 
 /// Webview labels.
 const CHROME: &str = "chrome";
+const LOADING: &str = "loading";
 const AGENT: &str = "agent";
 const TERMINAL: &str = "terminal";
 
@@ -65,30 +78,62 @@ static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
 
 // --- window layout ----------------------------------------------------------
 
-/// Lay the webviews out for a window of `size`.
-///
-/// Children do not reflow with the window, so every resize has to be applied by
-/// hand. Kept in one place so the three webviews can never disagree.
-fn layout(app: &tauri::AppHandle, size: PhysicalSize<u32>) {
-    let scale = app
-        .get_webview(CHROME)
-        .and_then(|webview| webview.window().scale_factor().ok())
-        .unwrap_or(1.0);
-    let bar = (TAB_BAR_HEIGHT * scale).round().max(1.0) as u32;
-    let body_height = size.height.saturating_sub(bar);
+/// Last geometry we laid out, so repeated resize events do not spam the log.
+static LAST_LAYOUT: Mutex<Option<(u32, u32, u64)>> = Mutex::new(None);
 
-    let strip = |label: &str, top: u32, height: u32| {
+/// Lay the webviews out for the window's *current* size and scale.
+///
+/// Queries the window on every call rather than accepting a size, because any
+/// geometry read during `setup` is provisional: the window is not yet mapped to
+/// a display, so on a Retina screen `scale_factor()` still reports `1.0` and
+/// `inner_size()` is equally untrustworthy. Trusting it made the top bar half
+/// its intended height and started the harness webview too high, which is what
+/// sandwiched the tab strip. Layout is therefore driven by events plus a short
+/// settle-in pass, never computed once.
+///
+/// Children also do not reflow with the window, so every resize has to be
+/// applied by hand. Kept in one place so the webviews cannot disagree.
+fn layout(app: &tauri::AppHandle) {
+    let Some(window) = app.get_window("main") else {
+        return;
+    };
+    let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
+        return;
+    };
+
+    let bar = (TITLEBAR_HEIGHT * scale).round().max(1.0) as u32;
+    let rail = (RAIL_WIDTH * scale).round().max(1.0) as u32;
+    let body_w = size.width.saturating_sub(rail);
+    let body_h = size.height.saturating_sub(bar);
+
+    let key = (size.width, size.height, scale.to_bits());
+    {
+        let mut last = LAST_LAYOUT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *last != Some(key) {
+            *last = Some(key);
+            eprintln!(
+                "[shell] layout {}x{} @{scale}x -> rail {rail}px, title bar {bar}px, body {body_w}x{body_h}",
+                size.width, size.height
+            );
+        }
+    }
+
+    let place = |label: &str, x: u32, top: u32, width: u32, height: u32| {
         if let Some(webview) = app.get_webview(label) {
             let _ = webview.set_bounds(Rect {
-                position: Position::Physical(PhysicalPosition::new(0, top as i32)),
-                size: Size::Physical(PhysicalSize::new(size.width, height)),
+                position: Position::Physical(PhysicalPosition::new(x as i32, top as i32)),
+                size: Size::Physical(PhysicalSize::new(width, height)),
             });
         }
     };
 
-    strip(CHROME, 0, bar);
-    strip(AGENT, bar, body_height);
-    strip(TERMINAL, bar, body_height);
+    // The rail spans the full height on the right, so it reads as a sidebar
+    // rather than a toolbar competing with the title bar.
+    place(CHROME, body_w, 0, rail, size.height);
+    // Content sits below the title bar and to the left of the rail.
+    place(LOADING, 0, bar, body_w, body_h);
+    place(AGENT, 0, bar, body_w, body_h);
+    place(TERMINAL, 0, bar, body_w, body_h);
 }
 
 // --- page helpers -----------------------------------------------------------
@@ -110,7 +155,7 @@ fn quoted(value: &str) -> String {
 fn report_progress(app: &tauri::AppHandle, fraction: f32, message: &str) {
     eval_in(
         app,
-        AGENT,
+        LOADING,
         &format!(
             "window.__dshProgress && window.__dshProgress({fraction}, {})",
             quoted(message)
@@ -131,7 +176,7 @@ fn report_failure(app: &tauri::AppHandle, message: &str) {
     report_status(app, "Startup failed");
     eval_in(
         app,
-        AGENT,
+        LOADING,
         &format!("window.__dshFailure && window.__dshFailure({})", quoted(message)),
     );
 }
@@ -251,7 +296,15 @@ fn extract_url(line: &str) -> Option<String> {
     }
 }
 
-/// Point the agent webview at the harness.
+/// Open the harness in its own webview.
+///
+/// The webview is created *directly on* the authenticated URL rather than being
+/// navigated there from our local loading page. That distinction matters: a
+/// navigation initiated from `tauri://localhost` is cross-site, and the harness
+/// mints its session cookie `SameSite=Strict`. The browser then withholds that
+/// cookie from the redirect that immediately follows, so the shell lands on the
+/// "authentication required" page holding a cookie it never sends. Creating the
+/// webview on the URL means nothing precedes it, so the redirect is same-site.
 fn open_harness(app: &tauri::AppHandle, url: &str) {
     let parsed = match tauri::Url::parse(url) {
         Ok(parsed) => parsed,
@@ -260,15 +313,41 @@ fn open_harness(app: &tauri::AppHandle, url: &str) {
             return;
         }
     };
-    match app.get_webview(AGENT) {
-        Some(webview) => {
-            if let Err(error) = webview.navigate(parsed) {
-                report_failure(app, &format!("could not load the harness UI: {error}"));
-            } else {
-                report_status(app, "");
+
+    let handle = app.clone();
+    let dispatched = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_window("main") else {
+            report_failure(&handle, "main window is missing");
+            return;
+        };
+        // `layout` reads the live geometry, so the new webview lands in the
+        // right place even if the window has been resized since startup.
+        let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
+            report_failure(&handle, "could not size the harness webview");
+            return;
+        };
+        let bar = (TITLEBAR_HEIGHT * scale).round().max(1.0) as u32;
+        let rail = (RAIL_WIDTH * scale).round().max(1.0) as u32;
+
+        match window.add_child(
+            tauri::webview::WebviewBuilder::new(AGENT, WebviewUrl::External(parsed)),
+            PhysicalPosition::new(0, bar as i32),
+            PhysicalSize::new(size.width.saturating_sub(rail), size.height.saturating_sub(bar)),
+        ) {
+            Ok(_) => {
+                // Retire the progress page only once the harness is on screen.
+                if let Some(loading) = handle.get_webview(LOADING) {
+                    let _ = loading.close();
+                }
+                layout(&handle);
+                report_status(&handle, "");
             }
+            Err(error) => report_failure(&handle, &format!("could not open the harness: {error}")),
         }
-        None => report_failure(app, "agent webview is missing"),
+    });
+
+    if let Err(error) = dispatched {
+        eprintln!("[shell] could not dispatch harness webview creation: {error}");
     }
 }
 
@@ -486,7 +565,8 @@ fn ensure_terminal(app: &tauri::AppHandle) -> Result<(), String> {
         .inner_size()
         .map_err(|e| format!("could not size the terminal: {e}"))?;
     let scale = window.scale_factor().unwrap_or(1.0);
-    let bar = (TAB_BAR_HEIGHT * scale).round().max(1.0) as u32;
+    let bar = (TITLEBAR_HEIGHT * scale).round().max(1.0) as u32;
+    let rail = (RAIL_WIDTH * scale).round().max(1.0) as u32;
 
     window
         .add_child(
@@ -495,7 +575,7 @@ fn ensure_terminal(app: &tauri::AppHandle) -> Result<(), String> {
                 WebviewUrl::App("terminal.html".into()),
             ),
             PhysicalPosition::new(0, bar as i32),
-            PhysicalSize::new(size.width, size.height.saturating_sub(bar)),
+            PhysicalSize::new(size.width.saturating_sub(rail), size.height.saturating_sub(bar)),
         )
         .map_err(|e| format!("could not create the terminal webview: {e}"))?;
     Ok(())
@@ -548,37 +628,62 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![select_tab, shell_status])
         .setup(|app| {
-            let window = tauri::window::WindowBuilder::new(app, "main")
+            // Overlay title bar: transparent, with the content view spanning the
+            // whole window. Without this, Tauri still enables a fullsize content
+            // view for the *default* style, so our top bar would be drawn
+            // underneath an opaque title bar and mostly hidden.
+            #[allow(unused_mut)]
+            let mut window_builder = tauri::window::WindowBuilder::new(app, "main")
                 .title("DSH Desktop")
                 .inner_size(1280.0, 860.0)
-                .min_inner_size(720.0, 480.0)
-                .build()?;
+                .min_inner_size(720.0, 480.0);
+            #[cfg(target_os = "macos")]
+            {
+                window_builder = window_builder
+                    .title_bar_style(tauri::TitleBarStyle::Overlay)
+                    // With a transparent title bar the window title would still
+                    // draw over our tab strip.
+                    .hidden_title(true);
+            }
+            let window = window_builder.build()?;
 
-            let size = window.inner_size()?;
-            let scale = window.scale_factor()?;
-            let bar = (TAB_BAR_HEIGHT * scale).round().max(1.0) as u32;
-
-            // The tab strip. This is the only surface granted IPC.
+            // Placeholder bounds; layout() corrects them as soon as the window
+            // is mapped to its display. See the note on `layout`.
+            //
+            // Transparent so the rail sits on the window's own background
+            // instead of an opaque strip beside the content.
             window.add_child(
-                tauri::webview::WebviewBuilder::new(
-                    CHROME,
-                    WebviewUrl::App("index.html".into()),
-                ),
-                PhysicalPosition::new(0, 0),
-                PhysicalSize::new(size.width, bar),
+                tauri::webview::WebviewBuilder::new(CHROME, WebviewUrl::App("index.html".into()))
+                    .transparent(true),
+                PhysicalPosition::new(1232, 0),
+                PhysicalSize::new(48, 860),
             )?;
 
-            // The harness. A remote origin, granted nothing.
+            // Startup progress. Closed once the harness webview exists.
             window.add_child(
-                tauri::webview::WebviewBuilder::new(AGENT, WebviewUrl::App("content.html".into())),
-                PhysicalPosition::new(0, bar as i32),
-                PhysicalSize::new(size.width, size.height.saturating_sub(bar)),
+                tauri::webview::WebviewBuilder::new(LOADING, WebviewUrl::App("content.html".into())),
+                PhysicalPosition::new(0, 28),
+                PhysicalSize::new(1232, 832),
             )?;
 
             let handle = app.handle().clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::Resized(size) = event {
-                    layout(&handle, *size);
+            window.on_window_event(move |event| match event {
+                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                    layout(&handle)
+                }
+                _ => {}
+            });
+            layout(app.handle());
+
+            // Settle-in pass: at this point the window is still not on a display,
+            // so the values just read are provisional. Re-apply a few times until
+            // the real scale factor and size arrive.
+            let settle = app.handle().clone();
+            std::thread::spawn(move || {
+                for delay in [80u64, 250, 600, 1200] {
+                    std::thread::sleep(Duration::from_millis(delay));
+                    let handle = settle.clone();
+                    let _ = settle.run_on_main_thread(move || layout(&handle));
                 }
             });
 
