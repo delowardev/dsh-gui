@@ -113,6 +113,31 @@ Anything with IPC access is a page we wrote. The harness webview is a remote
 origin and is granted none; the right-click menu is suppressed in every webview
 and devtools are compiled out of release builds.
 
+## Releasing
+
+```sh
+APPLE_SIGNING_IDENTITY="Apple Development: …" scripts/release.sh 0.1.3
+```
+
+Sets the version, builds, signs, packages `dist/`, writes `SHA256SUMS`, and
+prints the publish command. Publishing itself stays a deliberate step.
+
+**Sign the release.** Without `APPLE_SIGNING_IDENTITY` the binary is only
+linker-signed and its code identity is a hash derived from the binary, so it
+changes on every build. macOS keys permissions on that identity, which means it
+treats each update as a different app and re-asks for filesystem access. Signing
+pins it to `io.github.delowardev.dshgui` and the re-prompting stops.
+
+Signing does **not** remove the Gatekeeper prompt for browser downloads — that
+needs a Developer ID certificate and notarization, which requires a paid Apple
+Developer Program membership. It is why `install.sh` is the recommended path,
+and why every release must publish `SHA256SUMS`: that digest is what stands in
+for a signature.
+
+Never reuse a version. Clients only accept a greater version, so a corrected
+release at the same number cannot reach anyone who already installed it;
+`release.sh` refuses a tag that already exists.
+
 ## License
 
 MIT. DeepSeek Harness is MIT-licensed and remains the property of its authors.
