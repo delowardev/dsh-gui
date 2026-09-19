@@ -6,3 +6,5 @@ node_modules
 api-key.txt
 .runtime-build
 .runtime-test
+PLAN.md
+TODO.md

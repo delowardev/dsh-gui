@@ -6,9 +6,9 @@
     "darwin-arm64": {
       "name": "dsh-runtime-0.1.5-rc.2-darwin-arm64.tar.gz",
       "url": "https://github.com/delowardev/dsh-gui/releases/download/runtime-0.1.5-rc.2/dsh-runtime-0.1.5-rc.2-darwin-arm64.tar.gz",
-      "sha256": "d9edeeccc286bd49c90ca5b6385ef1623af2c2480c9eb50788febe19564c8136",
-      "bytes": 69107998,
-      "installedBytes": 260681728,
+      "sha256": "b7c075f911fedd79b2b54a8b3fc6cb41563aafea3374dff3450decf2bfb8b236",
+      "bytes": 68525005,
+      "installedBytes": 228747733,
       "files": 14803
     }
   }
