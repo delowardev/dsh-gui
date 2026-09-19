@@ -12,3 +12,4 @@ TODO.md
 .app-data
 .pnpm-store
 .pnpm-cache
+dist

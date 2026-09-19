@@ -13,7 +13,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE="${1:-$REPO_ROOT/assets/harness-logo.png}"
+SOURCE="${1:-$REPO_ROOT/static-assets/logo.png}"
 ICONS="$REPO_ROOT/src-tauri/icons"
 ICONSET="$ICONS/icon.iconset"
 
