@@ -785,7 +785,7 @@ fn main() {
             // underneath an opaque title bar and mostly hidden.
             #[allow(unused_mut)]
             let mut window_builder = tauri::window::WindowBuilder::new(app, "main")
-                .title("DSH Desktop")
+                .title("DeepSeek Harness (unofficial)")
                 .inner_size(1280.0, 860.0)
                 .min_inner_size(720.0, 480.0);
             #[cfg(target_os = "macos")]

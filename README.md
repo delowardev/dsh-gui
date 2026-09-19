@@ -1,9 +1,10 @@
-# dsh-gui
+# DeepSeek Harness (unofficial)
 
 A lightweight desktop shell for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), built with [Tauri v2](https://v2.tauri.app).
 
 > **Not an official DeepSeek AI product.** This is a community project. It is
-> not affiliated with, endorsed by, or supported by DeepSeek AI.
+> not affiliated with, endorsed by, or supported by DeepSeek AI. The name says
+> so deliberately.
 
 ## What it is
 
