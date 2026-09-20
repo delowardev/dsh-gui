@@ -34,7 +34,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{
@@ -178,7 +178,21 @@ fn quoted(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
 }
 
+/// The last step announced, so only transitions are logged.
+static LAST_STEP: Mutex<String> = Mutex::new(String::new());
+
 fn report_progress(app: &tauri::AppHandle, fraction: f32, message: &str) {
+    // Log transitions only: the download repaints every 512 KiB and would
+    // otherwise flood the log. A trace of steps is what makes a stalled startup
+    // diagnosable after the fact.
+    {
+        let mut last = LAST_STEP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *last != message {
+            eprintln!("[shell] step: {message}");
+            last.clear();
+            last.push_str(message);
+        }
+    }
     eval_in(
         app,
         LOADING,
@@ -197,9 +211,26 @@ fn report_status(app: &tauri::AppHandle, message: &str) {
     );
 }
 
+/// Tell the rail whether the surfaces exist yet.
+///
+/// The tabs start hidden in the page, so this only ever reveals them; there is
+/// no window in which a tab is offered before its content can be shown.
+fn set_shell_state(app: &tauri::AppHandle, state: &str) {
+    eval_in(
+        app,
+        CHROME,
+        &format!(
+            "window.__dshShellState && window.__dshShellState({})",
+            quoted(state)
+        ),
+    );
+}
+
 fn report_failure(app: &tauri::AppHandle, message: &str) {
     eprintln!("[shell] startup failed: {message}");
     report_status(app, "Startup failed");
+    // Nothing to switch to, so keep the tabs hidden behind the failure.
+    set_shell_state(app, "loading");
     eval_in(
         app,
         LOADING,
@@ -368,6 +399,8 @@ fn open_harness(app: &tauri::AppHandle, url: &str) {
                 }
                 layout(&handle);
                 report_status(&handle, "");
+                // Only now do the surfaces exist to switch between.
+                set_shell_state(&handle, "ready");
             }
             Err(error) => report_failure(&handle, &format!("could not open the harness: {error}")),
         }
@@ -404,13 +437,19 @@ fn harness_home(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// Uses the CLI's own `--from-default-profile` rather than writing the profile
 /// files here, so the bundle list stays owned by dsh and cannot drift. `--help`
 /// makes the booted app print usage and exit without binding a server.
-fn ensure_profile(node: &str, bin: &str, home: &Path) -> Result<(), String> {
+fn ensure_profile(
+    node: &str,
+    bin: &str,
+    home: &Path,
+    on_step: &dyn Fn(&str),
+) -> Result<(), String> {
     let profile_dir = home.join("profiles").join(PROFILE_NAME);
     if profile_dir.join("package.json").exists() {
         return Ok(());
     }
 
     eprintln!("[shell] initializing profile '{PROFILE_NAME}' from template '{PROFILE_TEMPLATE}'");
+    on_step("Creating your profile…");
     let output = Command::new(node)
         .arg(bin)
         .args([
@@ -474,10 +513,39 @@ fn start_bootstrap(app: tauri::AppHandle) {
     });
 }
 
+/// Keep the loading page honest while the harness boots.
+///
+/// Nothing is parsed from the harness here: on success it prints only its URL,
+/// so there is no real progress to read. These messages describe the one thing
+/// certainly true — the process is running and still loading its plugins.
+fn watch_boot(app: tauri::AppHandle, done: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        // One tick is 500ms.
+        for tick in 1..=60u64 {
+            std::thread::sleep(Duration::from_millis(500));
+            if done.load(Ordering::SeqCst) {
+                return;
+            }
+            let message = match tick {
+                4 => Some("Loading the harness plugins…"),
+                14 => Some("Still loading — the plugin tree is large. This is normal."),
+                30 => Some("Still loading. The first launch is usually the slowest."),
+                _ => None,
+            };
+            if let Some(message) = message {
+                report_progress(&app, -1.0, message);
+            }
+        }
+    });
+}
+
 /// Acquire the runtime, prepare the isolated harness home, then spawn.
 ///
 /// Runs on a background thread; `start_bootstrap` owns the one-at-a-time guard.
 fn bootstrap(app: tauri::AppHandle) {
+    // Every message here is a step that actually happened. Nothing is invented
+    // to look busy: the honest granularity is what the app itself did.
+    report_progress(&app, -1.0, "Checking the runtime…");
     let (node, bin) = match resolve_runtime(&app) {
         Ok(pair) => pair,
         Err(error) => {
@@ -494,8 +562,11 @@ fn bootstrap(app: tauri::AppHandle) {
         }
     };
 
-    report_progress(&app, -1.0, "Preparing harness…");
-    if let Err(error) = ensure_profile(&node, &bin, &home) {
+    report_progress(&app, -1.0, "Preparing the harness home…");
+    let handle = app.clone();
+    if let Err(error) = ensure_profile(&node, &bin, &home, &move |step| {
+        report_progress(&handle, -1.0, step);
+    }) {
         report_failure(&app, &error);
         return;
     }
@@ -524,7 +595,6 @@ fn run_sidecar(app: tauri::AppHandle, node: String, bin: String, home: PathBuf) 
 
     eprintln!("[shell] spawning harness: {node}");
     eprintln!("[shell]   DSH_HOME={}", home.display());
-    report_progress(&app, -1.0, "Starting the harness…");
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -537,6 +607,17 @@ fn run_sidecar(app: tauri::AppHandle, node: String, bin: String, home: PathBuf) 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let pid = child.id();
+    report_progress(
+        &app,
+        -1.0,
+        &format!("Starting the harness… (node pid {pid})"),
+    );
+
+    // The harness prints nothing until it is ready, so the remaining wait is
+    // covered by time-based messages. They describe the one thing certainly
+    // true: the process is up and the plugin tree is still loading.
+    let booted = Arc::new(AtomicBool::new(false));
+    watch_boot(app.clone(), Arc::clone(&booted));
     let _ = std::fs::write(pid_file_path(), format!("{pid}\t{node}"));
     *SIDECAR.lock().expect("sidecar mutex poisoned") = Some(child);
 
@@ -552,12 +633,14 @@ fn run_sidecar(app: tauri::AppHandle, node: String, bin: String, home: PathBuf) 
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             println!("[dsh] {line}");
             if let Some(url) = extract_url(&line) {
+                booted.store(true, Ordering::SeqCst);
                 println!("[shell] harness ready");
                 open_harness(&app, &url);
             }
         }
     }
 
+    booted.store(true, Ordering::SeqCst);
     eprintln!("[shell] harness process {pid} exited");
     let _ = std::fs::remove_file(pid_file_path());
 }
@@ -693,14 +776,17 @@ fn select_tab(app: tauri::AppHandle, webview: tauri::Webview, tab: String) -> Re
 }
 
 /// Whether the harness process is up yet.
+///
+/// Returns the shell state rather than a status line, so a rail that reloads
+/// can restore itself instead of being stuck with its tabs hidden.
 #[tauri::command]
 fn shell_status(webview: tauri::Webview) -> Result<String, String> {
     assert_caller(&webview, &[CHROME])?;
     Ok(
         if SIDECAR.lock().map(|guard| guard.is_some()).unwrap_or(false) {
-            String::new()
+            "ready".to_owned()
         } else {
-            "Starting…".to_owned()
+            "starting".to_owned()
         },
     )
 }
@@ -714,6 +800,8 @@ fn shell_status(webview: tauri::Webview) -> Result<String, String> {
 fn retry_setup(app: tauri::AppHandle, webview: tauri::Webview) -> Result<(), String> {
     assert_caller(&webview, &[LOADING])?;
     eprintln!("[shell] retrying setup at the user's request");
+    // The surfaces are gone again until this succeeds.
+    set_shell_state(&app, "loading");
     start_bootstrap(app);
     Ok(())
 }

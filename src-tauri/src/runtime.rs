@@ -334,7 +334,7 @@ pub fn ensure_runtime(
             manifest.runtime_version,
             runtime_dir.display()
         );
-        on_progress(-1.0, "Starting harness…");
+        on_progress(-1.0, "Runtime ready");
         return Ok(runtime_dir);
     }
 

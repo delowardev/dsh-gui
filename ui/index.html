@@ -51,11 +51,15 @@
       /* A `display` rule on the button would otherwise beat the UA's [hidden]. */
       #update[hidden] { display: none; }
       #update[disabled] { opacity: 0.4; }
+      /* The tabs start hidden and are revealed by Rust once the harness is up:
+         switching to a surface that does not exist yet is not an offer worth
+         making. Defaulting to hidden avoids a race with the first paint. */
+      button[data-tab][hidden] { display: none; }
       svg { width: 18px; height: 18px; display: block; }
     </style>
   </head>
   <body>
-    <button id="tab-agent" aria-selected="true" data-tab="agent" title="Agent">
+    <button id="tab-agent" aria-selected="true" data-tab="agent" title="Agent" hidden>
       <!-- chat bubble: the agent surface -->
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -63,7 +67,7 @@
       </svg>
     </button>
 
-    <button id="tab-terminal" aria-selected="false" data-tab="terminal" title="Terminal">
+    <button id="tab-terminal" aria-selected="false" data-tab="terminal" title="Terminal" hidden>
       <!-- terminal prompt: chevron + cursor -->
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -119,6 +123,14 @@
       };
       window.__dshSelect = (tab) => { current = tab; paint(tab); };
 
+      // Driven from Rust. "loading" hides the tabs; "ready" reveals them.
+      window.__dshShellState = (state) => {
+        const ready = state === "ready";
+        for (const button of document.querySelectorAll("button[data-tab]")) {
+          button.hidden = !ready;
+        }
+      };
+
       // --- updates -----------------------------------------------------------
       const updateButton = document.getElementById("update");
       let updating = false;
@@ -148,7 +160,14 @@
         }
       });
 
-      invoke("shell_status").catch(() => {});
+      // Restore state on load: if this page is ever reloaded, the tabs must not
+      // stay hidden just because the one-shot "ready" push already happened.
+      invoke("shell_status")
+        .then((state) => {
+          window.__dshShellState(state);
+          document.body.title = state === "ready" ? "" : "Starting…";
+        })
+        .catch(() => {});
     </script>
   </body>
 </html>
