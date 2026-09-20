@@ -13,3 +13,4 @@ TODO.md
 .pnpm-store
 .pnpm-cache
 dist
+.tauri

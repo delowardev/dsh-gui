@@ -718,6 +718,87 @@ fn retry_setup(app: tauri::AppHandle, webview: tauri::Webview) -> Result<(), Str
     Ok(())
 }
 
+// --- updates ----------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct UpdateInfo {
+    pub available: bool,
+    pub version: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// Ask the release feed whether a newer version exists.
+///
+/// Verified against the minisign public key baked into the app, not against
+/// Apple's signature — which is what lets a signed-but-not-notarized build
+/// update itself. A failure here is not worth interrupting anyone over, so
+/// callers treat an error as "no update".
+#[tauri::command]
+async fn update_check(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<UpdateInfo, String> {
+    assert_caller(&webview, &[CHROME])?;
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = app.updater().map_err(|e| format!("updates unavailable: {e}"))?;
+    match updater.check().await {
+        Ok(Some(update)) => {
+            eprintln!("[shell] update available: {}", update.version);
+            Ok(UpdateInfo {
+                available: true,
+                version: Some(update.version.clone()),
+                notes: update.body.clone(),
+            })
+        }
+        Ok(None) => {
+            eprintln!("[shell] no update available");
+            Ok(UpdateInfo {
+                available: false,
+                version: None,
+                notes: None,
+            })
+        }
+        Err(error) => {
+            eprintln!("[shell] update check failed: {error}");
+            Err(format!("could not check for updates: {error}"))
+        }
+    }
+}
+
+/// Download, verify, install, and relaunch into the new version.
+///
+/// The harness is stopped first: replacing the bundle under a running sidecar
+/// would leave an orphan holding the port, and the next launch would find it.
+#[tauri::command]
+async fn update_install(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<(), String> {
+    assert_caller(&webview, &[CHROME])?;
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = app.updater().map_err(|e| format!("updates unavailable: {e}"))?;
+    let Some(update) = updater
+        .check()
+        .await
+        .map_err(|e| format!("could not check for updates: {e}"))?
+    else {
+        return Err("no update is available".to_owned());
+    };
+
+    eprintln!("[shell] installing update {}", update.version);
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| format!("the update could not be installed: {e}"))?;
+
+    stop_sidecar();
+    terminal::close_all();
+    eprintln!("[shell] update installed; restarting");
+    app.restart();
+}
+
 // --- terminal commands ------------------------------------------------------
 //
 // The emulator front-end is vendored into `ui/vendor`, so there is no install
@@ -778,10 +859,13 @@ fn main() {
     reap_orphaned_sidecar();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             select_tab,
             shell_status,
             retry_setup,
+            update_check,
+            update_install,
             terminal_open,
             terminal_list,
             terminal_write,

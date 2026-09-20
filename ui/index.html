@@ -44,6 +44,13 @@
         opacity: 1;
         color: var(--accent);
       }
+      /* Pushed to the bottom, away from the tabs, so it reads as a notification
+         rather than another surface. */
+      #update { margin-top: auto; }
+      #update:not([hidden]) { opacity: 0.9; color: var(--accent); }
+      /* A `display` rule on the button would otherwise beat the UA's [hidden]. */
+      #update[hidden] { display: none; }
+      #update[disabled] { opacity: 0.4; }
       svg { width: 18px; height: 18px; display: block; }
     </style>
   </head>
@@ -62,6 +69,16 @@
            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <polyline points="5 8 9 12 5 16" />
         <line x1="12" y1="16" x2="19" y2="16" />
+      </svg>
+    </button>
+
+    <!-- Shown only when the release feed offers a newer version. -->
+    <button id="update" title="Check for updates" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 4v10" />
+        <polyline points="8 11 12 15 16 11" />
+        <path d="M5 18h14" />
       </svg>
     </button>
 
@@ -101,6 +118,35 @@
         document.body.title = text || "";
       };
       window.__dshSelect = (tab) => { current = tab; paint(tab); };
+
+      // --- updates -----------------------------------------------------------
+      const updateButton = document.getElementById("update");
+      let updating = false;
+
+      // A failure is not worth interrupting anyone over: an unreachable feed
+      // simply means no update is offered.
+      invoke("update_check")
+        .then((info) => {
+          if (!info || !info.available) return;
+          updateButton.hidden = false;
+          updateButton.title = `Update to ${info.version} — click to install`;
+        })
+        .catch(() => {});
+
+      updateButton.addEventListener("click", async () => {
+        if (updating) return;
+        updating = true;
+        updateButton.disabled = true;
+        updateButton.title = "Installing update…";
+        try {
+          // On success the app relaunches, so nothing after this runs.
+          await invoke("update_install");
+        } catch (error) {
+          updating = false;
+          updateButton.disabled = false;
+          updateButton.title = String(error);
+        }
+      });
 
       invoke("shell_status").catch(() => {});
     </script>

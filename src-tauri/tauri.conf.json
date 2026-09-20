@@ -14,9 +14,18 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYzQTE5RkVDMjBDQjYwMjQKUldRa1lNc2c3SitoWXlmUmFnT1VHWDBsUk5VZUxXVDByeTJKV2lpVDdsWU9HQ3gwU1dHNzlaMUMK",
+      "endpoints": [
+        "https://github.com/delowardev/dsh-gui/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "A lightweight desktop shell for DeepSeek Harness",
     "longDescription": "Community desktop shell for DeepSeek Harness (dsh). Brings the harness into a native window with an agent surface and a terminal, downloading its runtime on first launch so no system Node install is required. Not an official DeepSeek AI product.",

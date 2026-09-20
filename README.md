@@ -82,7 +82,7 @@ installation you already have.
 | Terminal | Real PTY, session sidebar (drag to resize), Monaspace Krypton |
 | Theme | Vira Graphene, matching the VS Code theme of the same name |
 | Prompt | git branch shown when your prompt is still a stock default |
-| Updates | Shell and runtime are downloaded and verified separately |
+| Updates | Self-updating; the update payload is verified against a minisign key baked into the app |
 
 The terminal's emulator front-end (`xterm.js` and the font) is downloaded on
 first use and pinned by digest, so it stays out of the base install.
@@ -119,8 +119,15 @@ and devtools are compiled out of release builds.
 APPLE_SIGNING_IDENTITY="Apple Development: …" scripts/release.sh 0.1.3
 ```
 
-Sets the version, builds, signs, packages `dist/`, writes `SHA256SUMS`, and
-prints the publish command. Publishing itself stays a deliberate step.
+Sets the version, builds, signs, packages `dist/`, writes `SHA256SUMS` and
+`latest.json`, and prints the publish command. Publishing itself stays a
+deliberate step.
+
+> **Keep the updater private key safe.** `.tauri/dsh-gui.key` signs every update,
+> and the matching public key is baked into the app. Anyone who obtains it can
+> push an update that every installed copy will accept; if you **lose** it, you
+> can never update an installed build again. Store it in a password manager or a
+> CI secret — it is gitignored and must never be committed.
 
 **Sign the release.** Without `APPLE_SIGNING_IDENTITY` the binary is only
 linker-signed and its code identity is a hash derived from the binary, so it
