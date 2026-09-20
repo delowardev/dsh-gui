@@ -27,6 +27,7 @@
 //!   5. navigate the agent webview to the authenticated URL it prints
 //!   6. stop it gracefully on exit, and never leave an orphan
 
+mod credentials;
 mod runtime;
 mod terminal;
 
@@ -806,6 +807,89 @@ fn retry_setup(app: tauri::AppHandle, webview: tauri::Webview) -> Result<(), Str
     Ok(())
 }
 
+// --- first-run API key ------------------------------------------------------
+
+/// Whether a key is already configured, so the prompt can be skipped.
+#[tauri::command]
+fn api_key_status(app: tauri::AppHandle, webview: tauri::Webview) -> Result<bool, String> {
+    assert_caller(&webview, &[LOADING])?;
+    Ok(credentials::has_api_key(&harness_home(&app)?))
+}
+
+#[derive(serde::Serialize)]
+pub struct KeyOutcome {
+    pub saved: bool,
+    pub message: String,
+}
+
+/// Check the key against DeepSeek, then store it.
+///
+/// Verified *before* saving so a typo is caught while the download is still
+/// running, rather than surfacing as a failed first message. A key that cannot
+/// be checked because the network is unreachable is still saved and said so —
+/// a connectivity problem must not read as a bad key.
+///
+/// The key is never logged.
+///
+/// `async` keeps the HTTP round-trip off the main thread: a synchronous command
+/// runs on the event loop, so a slow reply would freeze the window and stall the
+/// download progress this page exists to show.
+#[tauri::command(async)]
+fn api_key_save(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    key: String,
+) -> Result<KeyOutcome, String> {
+    assert_caller(&webview, &[LOADING])?;
+    let key = key.trim().to_owned();
+    if key.is_empty() {
+        return Err("Enter a key first.".to_owned());
+    }
+
+    let home = harness_home(&app)?;
+    match credentials::verify(&key) {
+        credentials::Verdict::Valid => {
+            credentials::save(&home, &key)?;
+            Ok(KeyOutcome {
+                saved: true,
+                message: "Key verified and saved.".to_owned(),
+            })
+        }
+        credentials::Verdict::Rejected => Ok(KeyOutcome {
+            saved: false,
+            message: "DeepSeek rejected that key. Check it and try again.".to_owned(),
+        }),
+        credentials::Verdict::Unchecked(reason) => {
+            credentials::save(&home, &key)?;
+            Ok(KeyOutcome {
+                saved: true,
+                message: format!("Saved, but it could not be checked — {reason}."),
+            })
+        }
+    }
+}
+
+/// Open one of the fixed help links in the user's browser.
+///
+/// Following a link inside the loading webview would navigate away from setup
+/// and destroy the progress page. It takes a key rather than a URL so it can
+/// only ever open a destination we chose — a page that could name an arbitrary
+/// URL would be a way to make the app open anything.
+#[tauri::command]
+fn open_help(webview: tauri::Webview, which: String) -> Result<(), String> {
+    assert_caller(&webview, &[LOADING])?;
+    let url = match which.as_str() {
+        "keys" => "https://platform.deepseek.com/api_keys",
+        "docs" => "https://api-docs.deepseek.com/",
+        other => return Err(format!("unknown help link {other:?}")),
+    };
+    Command::new("/usr/bin/open")
+        .arg(url)
+        .spawn()
+        .map_err(|e| format!("could not open the browser: {e}"))?;
+    Ok(())
+}
+
 // --- updates ----------------------------------------------------------------
 
 #[derive(serde::Serialize)]
@@ -952,6 +1036,9 @@ fn main() {
             select_tab,
             shell_status,
             retry_setup,
+            api_key_status,
+            api_key_save,
+            open_help,
             update_check,
             update_install,
             terminal_open,

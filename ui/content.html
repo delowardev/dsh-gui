@@ -51,6 +51,37 @@
       #retry:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
       #retry[disabled] { opacity: 0.5; }
       #retry.visible { display: block; }
+
+      /* First-run API key */
+      #key {
+        display: flex; flex-direction: column; gap: 7px;
+        width: 340px; margin-top: 6px;
+      }
+      #key[hidden] { display: none; }
+      .key-title { font-size: 12px; opacity: 0.75; }
+      .key-row { display: flex; gap: 6px; }
+      #key-input {
+        flex: 1; min-width: 0;
+        padding: 6px 9px; border-radius: 6px; font: inherit; font-size: 12px;
+        border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+        background: color-mix(in srgb, currentColor 6%, transparent);
+        color: inherit;
+      }
+      #key-input:focus { outline: none; border-color: color-mix(in srgb, currentColor 45%, transparent); }
+      #key-save {
+        padding: 6px 14px; border-radius: 6px; font: inherit; font-size: 12px;
+        border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+        background: color-mix(in srgb, currentColor 10%, transparent);
+        color: inherit; cursor: default;
+      }
+      #key-save:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
+      #key-save[disabled] { opacity: 0.5; }
+      .key-note { font-size: 11px; opacity: 0.55; }
+      .key-note a { color: inherit; text-decoration: underline; cursor: default; }
+      .key-note .sep { opacity: 0.5; padding: 0 2px; }
+      .key-status { font-size: 11px; opacity: 0.55; min-height: 1.3em; }
+      /* Once it is saved there is nothing left to do here. */
+      #key.done .key-row, #key.done .key-note { display: none; }
     </style>
   </head>
   <body>
@@ -58,6 +89,23 @@
     <div class="label" id="label">Starting…</div>
     <div class="track" id="track"><div class="bar" id="bar"></div></div>
     <div class="detail" id="detail"></div>
+
+    <!-- Offered during the download, which leaves the user with nothing to do
+         for about eighty seconds and one thing they cannot finish without. -->
+    <div id="key" hidden>
+      <div class="key-title">Add your DeepSeek API key</div>
+      <div class="key-row">
+        <input id="key-input" type="password" placeholder="sk-…" spellcheck="false"
+               autocomplete="off" autocapitalize="off" />
+        <button id="key-save">Save</button>
+      </div>
+      <div class="key-note">
+        <a href="#" data-help="keys">Where to get a key</a>
+        <span class="sep">·</span>
+        <a href="#" data-help="docs">API docs</a>
+      </div>
+      <div class="key-status" id="key-status">Optional, but the harness cannot reach DeepSeek without one.</div>
+    </div>
     <pre class="error" id="error"></pre>
     <button id="retry">Retry</button>
 
@@ -79,6 +127,8 @@
         if (typeof fraction === "number" && fraction >= 0) {
           track.style.display = "block";
           bar.style.width = Math.round(Math.min(fraction, 1) * 100) + "%";
+          // A real download is underway — the one stretch with nothing to do.
+          offerKey();
         } else {
           track.style.display = "none";
         }
@@ -113,6 +163,62 @@
           errorBox.textContent = String(error);
         }
       });
+
+      // --- first-run API key -------------------------------------------------
+      const keySection = document.getElementById("key");
+      const keyInput = document.getElementById("key-input");
+      const keySave = document.getElementById("key-save");
+      const keyStatus = document.getElementById("key-status");
+      let keyConfigured = false;
+      let keyDone = false;
+
+      // Resolved before the section is ever shown, so an existing key is not
+      // reported as missing just because this reply was still in flight.
+      const keyStatusKnown = invoke("api_key_status")
+        .then((has) => { keyConfigured = has; })
+        .catch(() => {});
+
+      // Only offered while a download is running: on a normal start the page
+      // closes in seconds, and flashing the prompt every launch would nag.
+      async function offerKey() {
+        await keyStatusKnown;
+        if (keyConfigured || keyDone) return;
+        keySection.hidden = false;
+      }
+
+      async function saveKey() {
+        const key = keyInput.value.trim();
+        if (!key) { keyStatus.textContent = "Enter a key first."; return; }
+        keySave.disabled = true;
+        keyStatus.textContent = "Checking with DeepSeek…";
+        try {
+          const outcome = await invoke("api_key_save", { key });
+          keyStatus.textContent = outcome.message;
+          if (outcome.saved) {
+            keyDone = true;
+            keyInput.value = "";
+            keySection.classList.add("done");
+          }
+        } catch (error) {
+          keyStatus.textContent = String(error);
+        } finally {
+          keySave.disabled = false;
+        }
+      }
+
+      keySave.addEventListener("click", saveKey);
+      keyInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") saveKey();
+      });
+
+      // Links must not navigate this page away mid-setup, and Rust only accepts
+      // a known destination rather than a URL from here.
+      for (const link of document.querySelectorAll("[data-help]")) {
+        link.addEventListener("click", (event) => {
+          event.preventDefault();
+          invoke("open_help", { which: link.dataset.help }).catch(() => {});
+        });
+      }
     </script>
   </body>
 </html>
