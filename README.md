@@ -103,7 +103,7 @@ The runtime payload is built separately and published as its own release:
 bash scripts/build-runtime.sh --base-url https://github.com/<owner>/<repo>/releases/download/<tag>
 ```
 
-Icons are generated from `assets/harness-logo.png`:
+Icons are generated from `static-assets/logo.png` (800×800):
 
 ```sh
 bash scripts/build-icons.sh
@@ -114,6 +114,9 @@ origin and is granted none; the right-click menu is suppressed in every webview
 and devtools are compiled out of release builds.
 
 ## Releasing
+
+Write `release-notes/<version>.md` first — `release.sh` requires it, because both
+`latest.json` and the GitHub release embed it.
 
 ```sh
 APPLE_SIGNING_IDENTITY="Apple Development: …" scripts/release.sh 0.1.3

@@ -5,6 +5,10 @@
 #
 #   scripts/release.sh 0.1.3
 #
+# Requires release-notes/<version>.md to exist. Note the version argument must
+# match the filename exactly, so notes for one version can never ship with
+# another.
+#
 # Signing inputs come from the environment:
 #   APPLE_SIGNING_IDENTITY          e.g. "Apple Development: you@example.com (XXXXXXXXXX)"
 #   TAURI_SIGNING_PRIVATE_KEY_PATH  defaults to .tauri/dsh-gui.key
@@ -76,6 +80,20 @@ pnpm tauri build
 
 echo "==> packaging"
 rm -rf dist && mkdir -p dist
+
+# Copy the notes in *after* dist/ is wiped. They feed both the updater manifest
+# below and `gh release create`, and reading them from dist/ before this point
+# is why the manifest's "notes" field -- the text the in-app update prompt shows
+# -- could only ever come out empty.
+NOTES="$REPO_ROOT/release-notes/${VERSION}.md"
+if [ ! -f "$NOTES" ]; then
+  echo "error: no release notes at release-notes/${VERSION}.md" >&2
+  echo "       Both latest.json and the GitHub release embed them. Without the" >&2
+  echo "       file the update prompt ships blank, with nothing to say it broke." >&2
+  exit 1
+fi
+cp "$NOTES" dist/RELEASE_NOTES.md
+
 cp "$BUNDLE/dmg/DeepSeek Harness (unofficial)_${VERSION}_aarch64.dmg" "dist/${BASE_NAME}.dmg"
 ditto -c -k --sequesterRsrc --keepParent \
   "$BUNDLE/macos/DeepSeek Harness (unofficial).app" "dist/${BASE_NAME}.app.zip"

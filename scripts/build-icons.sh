@@ -3,7 +3,7 @@
 # Build the app icon set from one square source PNG.
 #
 # Usage: scripts/build-icons.sh [source.png]
-#   defaults to assets/harness-logo.png
+#   defaults to static-assets/logo.png
 #
 # macOS needs an .icns whose largest entry is 512@2x (1024px). If the source is
 # smaller than that, the large entries are upscaled — they will be soft. Replace
